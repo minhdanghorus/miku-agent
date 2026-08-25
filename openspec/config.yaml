@@ -1,20 +1,39 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Project context. Shown to AI when creating artifacts.
+context: |
+  miku-agent — a local-first personal assistant agent. Learning repo: the goal is to
+  understand agent internals while building on a modern framework stack.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Stack: Python 3.13, uv, LangGraph (hand-built StateGraph — never create_react_agent or
+  other prebuilts), langchain-openai, pydantic-settings, pydantic-evals. SQLite for all
+  state. Async throughout; the CLI owns the only asyncio.run.
+
+  Layout: miku/{gateway,runtime,graph,tools,memory,ops}/ plus evals/ at the repo root.
+  Tests live under evals/, not tests/. Runtime state in .miku/ (gitignored).
+
+  Providers are OpenAI-compatible (GreenNode today; OpenRouter/DeepSeek/Anthropic later).
+  The provider adapter abstracts configuration — roles, capability flags, limits — never
+  wire formats, which LangChain already handles. Adding a provider must mean adding a
+  descriptor, never editing a call site.
+
+  Memory is two separate tiers: a LangGraph checkpointer for per-thread conversation state,
+  and a LangGraph Store for cross-thread facts. They are never mixed.
+
+  Design constraint: legibility. Explicit readable code over framework indirection. The
+  project will get bigger; it must not get muddier.
+
+  Phase 1 (CLI agent) is implemented. Phase 2 is best-of-N fan-out via Send, budget caps,
+  node cache, retrieval gate and consolidation. Phase 3 is judge evals plus a web UI with
+  two surfaces: a harness cockpit and a ChatGPT-style conversation screen.
+
+rules:
+  proposal:
+    - State what is explicitly out of scope and which later phase owns it.
+  design:
+    - Give each decision an alternative that was considered and why it was rejected.
+    - Prefer measured claims over expected ones; if something was probed live, say so.
+  specs:
+    - Scenarios must be assertable on observable state, not on how a reply is worded.
+  tasks:
+    - Put the tests for a module in the same task group as the module.

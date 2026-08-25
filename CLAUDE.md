@@ -1,36 +1,82 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this
+repository.
 
 ## Project state
 
-miku-agent is at the scaffolding stage: `main.py` is a `print()` stub, `pyproject.toml` declares no dependencies, and there is no package layout, test suite, or lint config yet. There is no architecture to discover from the code — the intent lives in the README and in OpenSpec changes.
+miku-agent is a local-first personal assistant agent. **Phase 1 is implemented**: a CLI
+conversation on a hand-built LangGraph `StateGraph`, with scheduling tools, two-tier memory,
+JSONL tracing, and a deterministic eval suite. The design constraint is legibility — explicit,
+readable code over framework indirection.
 
-Goal (README): a local-first AI agent harness — agent loop, memory, and eval — that stays legible as it grows. When adding structure, prefer explicit, readable code over framework indirection; that legibility goal is the project's stated design constraint.
+Planning lives in OpenSpec. The Phase 1 change is
+`openspec/changes/miku-phase-1-cli-agent/`, and the architecture reasoning behind every
+decision (including the live provider spike results) is in
+`openspec/explorations/2026-08-25-miku-agent-architecture.md`. Read the exploration before
+proposing structural changes — most of the obvious alternatives were already considered and
+rejected there for stated reasons.
+
+## Architecture map (box -> file)
+
+- `miku/gateway/cli.py` — the terminal. Moves text only: no prompt assembly, no model calls,
+  no tool execution, no memory reads. That constraint is what makes a second gateway cheap.
+- `miku/runtime/config.py` — every knob, `MIKU_`-prefixed. **Nothing else reads the
+  environment**, except `providers.py` reading the provider key.
+- `miku/runtime/providers.py` — the provider adapter. Roles (`main`/`fast`/`judge`/`embed`),
+  per-model capability flags, and two builders: `chat_model(role)` for LangChain,
+  `judge_model()` for pydantic-evals.
+- `miku/runtime/session.py` — one session: store + checkpointer + tools + model + tracer +
+  compiled graph. Nothing is a module-level global; the eval suite runs many sessions per
+  process.
+- `miku/graph/build.py` — the loop, wired by hand. `miku/graph/nodes.py` — the three nodes.
+- `miku/memory/checkpointer.py` — thread state. `miku/memory/store.py` — cross-thread facts.
+- `miku/tools/` — `create_event` / `list_events` / `remember`, plus `registry.py` and the
+  injectable `clock.py`.
+- `miku/ops/tracing.py` — JSONL sink with redaction inside the sink.
+- `miku/SOUL.md` — the persona: name and tone only.
+- `evals/deterministic/` — tests. `evals/task.py` is the single task function cases drive;
+  `evals/evaluators.py` holds the evaluators; `evals/helpers.py` has the stub model.
+- Runtime state lives in `.miku/` (state.db, traces/) — gitignored.
 
 ## Environment and commands
 
-Python 3.13 (`.python-version`), managed with `uv`; a `.venv` is already present.
+Python 3.13, managed with `uv`.
 
 ```bash
-uv run main.py            # run the entry point
-uv sync                   # install/refresh deps after editing pyproject.toml
-uv add <pkg>              # add a dependency (edits pyproject.toml + uv.lock)
+uv sync --extra dev        # install
+uv run miku                # talk to Miku (new thread)
+uv run miku --thread work  # resume a named conversation
+uv run pytest              # the whole suite
+uv run pytest -k live      # only the cases that call the real provider
+uv run ruff check .        # lint (must be clean)
 ```
 
-No test runner or linter is configured yet. If tests are needed, add pytest via `uv add --dev pytest` and run `uv run pytest` (`uv run pytest path/to/test_x.py::test_name` for a single test) — but confirm the choice against any active OpenSpec change first rather than introducing tooling ad hoc.
+Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` reflects that.
 
-## OpenSpec workflow
+## Rules
 
-This repo uses OpenSpec (`openspec/config.yaml`, schema `spec-driven`) with skills and `/opsx:*` commands under `.claude/`. Feature work is expected to go through it rather than straight to code:
+- **Do not add `create_react_agent` or other prebuilt agents.** The hand-built graph is the
+  point of the repo, not an accident.
+- **Do not hand-roll wrappers over streaming, tool binding, or retry.** LangChain provides
+  them. The provider adapter abstracts *configuration*, never wire formats.
+- **Adding a provider means adding a descriptor to `PROVIDERS`.** If a change requires
+  editing a call site, the seam is in the wrong place.
+- **Capability flags are declared, never inferred.** No `if model == "qwen..."` anywhere. An
+  unprobed capability is `"unknown"` and counts as unsupported.
+- **Evaluators assert on tool calls and stored rows, never on reply wording.** Small models
+  phrase things differently every run; a stored row does not.
+- **Keep the two memory tiers apart.** The checkpointer is not for facts; the store is not for
+  message history.
+- **Errors degrade, they do not crash.** Tool failures become tool results the model can see.
+  Trace-write failures warn. Only configuration errors fail loudly, at startup.
+- **CLI output stays ASCII.** Windows consoles mangle em dashes and bullets.
+- No new dependencies without discussion.
 
-- `/opsx:explore` — think through a problem before committing to a plan
-- `/opsx:propose` — create a change with proposal.md, design.md, tasks.md
-- `/opsx:apply` — implement the change's tasks
-- `/opsx:sync` / `/opsx:archive` — fold delta specs into main specs, then archive
+## Known limits (deliberate, not oversights)
 
-Practical notes when driving it:
-
-- The `openspec` CLI is the source of truth for paths. Use `openspec status --change <name> --json` and `openspec instructions <artifact> --change <name> --json`, and write to the `resolvedOutputPath` they report — do not assume repo-relative locations.
-- `context` and `rules` from the instructions JSON are constraints on what you write, never content to copy into the artifact file.
-- `openspec/config.yaml` currently has `context:` and `rules:` commented out. Once the stack and conventions settle, filling in `context:` is the right place to record them — it is injected into every artifact generation.
+- No retrieval gate and no consolidation: every fact rides along in every turn. Fine at tens,
+  wrong at thousands. First Phase 2 item.
+- No prompt caching — unverified on GreenNode, so full context is re-sent each turn.
+- `main` defaults to `google/gemma-4-31b-it`. Measured, not assumed: `openai/gpt-4o-mini`
+  fails the weekday-resolution cases (it books "Saturday" as a Thursday).

@@ -219,3 +219,7 @@ __marimo__/
 
 # Claude
 .claude/
+
+# Runtime state: state.db, traces/. Never committed.
+.miku/
+

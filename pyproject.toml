@@ -1,7 +1,48 @@
 [project]
 name = "miku-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "A local-first personal assistant agent on a hand-built LangGraph loop: harness + memory + eval, in code you can read."
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "langgraph>=1.0",              # the graph runtime + Send/checkpointer APIs
+    "langchain-openai>=1.0",       # every provider we support speaks the OpenAI wire
+    "langgraph-checkpoint-sqlite>=2.0",  # SqliteSaver (thread state) + SqliteStore (facts)
+    "pydantic-settings>=2.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+miku = "miku.__main__:main"
+
+[project.optional-dependencies]
+# Eval pillar. pydantic-evals is standalone: Dataset.evaluate_sync takes any async
+# function, so it drives our LangGraph turn without pulling us into pydantic-ai's
+# agent layer. Its LLMJudge does resolve models through pydantic-ai, which is why
+# the provider adapter exposes judge_model() alongside chat_model().
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pydantic-evals>=1.0",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["miku"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# Pinned rather than inherited, so a ruff release cannot change what "clean"
+# means here. DTZ is deliberately absent: a personal calendar deals in local
+# naive dates ("Saturday at 8am"), and forcing them tz-aware would be wrong.
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["evals"]
+asyncio_mode = "auto"
