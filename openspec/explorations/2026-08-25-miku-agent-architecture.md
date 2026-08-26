@@ -455,7 +455,7 @@ start rather than discovering while writing the first judge eval.
 | 1 | CLI · hand-built StateGraph · provider registry · scheduling tools · SqliteSaver + Store (`remember`) · JSONL tracing · deterministic evals |
 | 2 | Best-of-N fan-out (`propose_slots` tool wrapping a `Send` subgraph) · per-turn budget · node cache · span/parent tracing |
 | 2.5a | Fact consolidation: supersede / duplicate / merge / expire, tombstoned, behind `miku consolidate` |
-| 2.5b | Selection: embeddings (`bge-m3`), top-k recall, and the similarity threshold that gives gating for free. Gated on a spike |
+| 2.5b | Selection: embeddings (`bge-m3`), top-k recall, `miku reindex` + index fingerprint. No gate and no threshold - the pollution spike closed that question |
 | 3 | Judge evals (`LLMJudge`) · **UI, two surfaces** (see below) |
 | later | OTel spans · other gateways · guardrails · semantic search over memory |
 
@@ -509,18 +509,11 @@ cheap ones it exists to protect, and its failure modes are asymmetric: loading f
 unnecessarily is mild and visible, while skipping facts the turn needed is rare, invisible, and
 the worst thing a memory system can do.
 
-Two cheaper ways to get the same protection are on the table for 2.5b:
-
-1. **A similarity threshold.** If nothing scores above it, recall returns nothing — that is the
-   gate, obtained from a number on the embed call selection already pays for.
-2. **Memory as a tool.** Facts are absent from the prompt by default and arrive only when the
-   model calls `recall_memory`. This is Phase 2's own lesson reapplied: choosing a tool is
-   already the model's decision surface, which is why `propose_slots` beat a router node. It
-   taxes only the turns that use memory, where a gate taxes all of them. Its real cost is that
-   facts then live in message history and get checkpointed.
-
-Both are cheaper than a model-call gate. Which one wins is a measurement, not an argument — the
-open pollution spike below.
+Two cheaper replacements were on the table — a similarity threshold, where recall returns
+nothing if nothing scores above it, and memory-as-a-tool, where facts are absent from the prompt
+until the model calls `recall_memory`. The spike below measured the problem all three were meant
+to solve and did not find it, so all three are dropped. The measurement is recorded in the next
+section.
 
 **Staleness stopped being a TTL.** `TTLConfig` was the plan and did not survive contact with
 the data: it expires by age alone, so it cannot tell "this week I'm in Hanoi" from "I prefer
@@ -528,6 +521,122 @@ meetings in the morning". A blanket TTL retires durable preferences, which is th
 information loss consolidation exists to prevent, arriving by a different road. Expiry became
 the fourth operation in the plan the pass already produces — same call, same validation, same
 tombstone, no extra cost, and it can read that a fact is time-bound.
+
+### Measured: context pollution is real, reproducible, and harmless (2026-08-26)
+
+Carrying facts into a turn that does not need them was the argument for a retrieval gate. It was
+never measured, so it was measured. 40 live turns on GreenNode: two arms × ten harmless turns
+× two replications.
+
+Arm A ran against a store seeded with 15 realistic facts (morning meetings, tennis on Tuesdays, a
+manager named Linh, a 09:30 standup). Arm B was the control — an empty store, same code path.
+Every turn got its own `thread_id`, so the ten turns could not contaminate one another and the
+only variable between the arms was the presence of facts. The turns were deliberately trivial:
+`hello`, `what is 2+2?`, `thanks!`, `what is the capital of Japan?`, `bye`. `good morning` was a
+lexical trap set against the `I prefer meetings in the morning` fact.
+
+Every hard metric came back clean:
+
+| Metric | Result over all 40 turns |
+| --- | --- |
+| Tool calls | **0** |
+| Requests per turn | **1**, no turn deviated |
+| Facts surfacing in a reply (16 distinctive probes) | **0** |
+| Errors | **0** |
+
+The worst case the spike existed to catch — a turn about arithmetic calling `create_event` — did
+not occur once. Neither did the mild case of the agent volunteering memory unprompted. The
+`good morning` trap produced byte-identical replies in both arms.
+
+**The replication is what makes the result readable, and it nearly went the other way.** A single
+run showed the arms differing on 2 of 10 turns, which reads as noise and would have been reported
+as such. But `chat_model` pins `temperature=0`, so the noise floor is measurably zero:
+
+```
+A1 vs B1  (signal?)     differs 2/10   ['thanks!', 'ocean fact']
+A2 vs B2  (signal?)     differs 2/10   ['thanks!', 'ocean fact']   <- the same two
+B1 vs B2  (pure noise)  differs 0/10   []
+A1 vs A2  (pure noise)  differs 0/10   []
+```
+
+Same two turns, byte-identical across replications. So the difference is not sampling variance;
+it is a real, reproducible effect of 1.5k tokens of facts sitting ahead of the question. On
+`thanks!` arm A added a sentence arm B did not. On the ocean question the two arms returned
+different true facts.
+
+So pollution exists, and it moves **wording, not behaviour**. Since this repo asserts on tool
+calls and stored rows and never on reply wording, the thing it perturbs is the thing already
+declared unassertable.
+
+**What it settles.** All three protective mechanisms — the waku-style model gate, the similarity
+threshold, and memory-as-a-tool — were proposed to prevent a harm that does not occur at this
+scale. They are solutions to a problem that is not there, and 2.5b becomes selection alone. This
+is a happy outcome for memory-as-a-tool in particular: it was the one option that pushed facts
+through a tool result into the checkpointer, blurring the line that *"keep the two memory tiers
+apart"* draws, and dropping it keeps that rule intact at no cost.
+
+It also strengthens the embedding-index decision in the next section. If selection is a
+**scale optimisation and not a correctness mechanism**, then degrading to full recall on a
+fingerprint mismatch costs latency and context and gives up nothing in answer quality.
+
+**And it reframes why 2.5b happens at all.** The remaining justification is scale, not quality —
+and the real store holds 0 facts today (every spike to date ran against a temporary state dir).
+Selection is therefore infrastructure for a problem two orders of magnitude away. That may still
+be worth building, because this repo exists to learn how agents work, but the reason on the
+record has to be *"to learn how retrieval is built"* rather than *"to fix something that hurts"*.
+Recording the wrong reason is how a Known limit gets misread a year later.
+
+**Bounds on the claim.** 15 facts, not 500 — at thousands, facts dominate the prompt and the
+measured shift may stop being benign; this says nothing about that regime. Ten turns chosen by
+hand, not sampled from real logs. And the facts were clean, which is the post-consolidation
+state; contradictory facts may behave differently.
+
+### Changing the embedding model: the index is derived, so rebuild it
+
+An embedding is a cache, not data. The fact text is the source of truth, the vector is a pure
+function of it, and no fact is lost when the function changes — so this is a detection-and-rebuild
+problem, not a migration problem. That is also why re-embedding does not collide with the rule
+that a stored fact is never rewritten: a rebuild touches the vector table and never the row.
+
+Two failure modes, and the safe one is the loud one:
+
+- **Different dimensions.** `sqlite-vec` fixes `dims` when the table is created, so inserts and
+  queries fail outright. Noisy, immediate, harmless.
+- **Same dimensions, different model.** Nothing fails. The stored vectors and the query vector
+  live in unrelated spaces, so cosine similarity returns a meaningless number and top-k returns
+  arbitrary facts. This is the dangerous case, and it is the same asymmetry that killed the
+  retrieval gate: skipping facts the turn needed is rare, invisible, and the worst failure a
+  memory system has.
+
+Rebuild-from-scratch **is** the migration strategy at this scale. A hundred facts at ~20 tokens
+is one batched call — dual-writing or shadow-indexing would be technique applied to a problem
+that does not exist. Three decisions follow:
+
+1. **The fingerprint lives in a JSON file under `.miku/`, not in the store.** It is runtime
+   metadata about an index, not a fact about the user, and putting it in a store namespace would
+   mix the two. A file is also readable by eye when something is wrong, which is when it matters.
+   Contents: provider, model id, dims, and the prompt convention — `bge-m3` embeds text raw while
+   the `e5`/`gte` families need `query:`/`passage:` prefixes, so changing convention alone breaks
+   recall just as thoroughly as changing model.
+2. **`miku reindex` is its own command, not a flag on `consolidate`.** The two solve unrelated
+   problems, and `consolidate` already owns a dry-run/apply distinction that would collide.
+   Ordering matters though: consolidate first, reindex second, so nothing pays to be embedded on
+   its way to a tombstone. A reindex embeds live facts only — a tombstoned row can never be
+   revived, so there is no reason to carry it in the index.
+3. **A mismatch degrades to full recall; it does not crash and does not search anyway.** The
+   fallback already exists and is already proven: `recall_facts` today returns every live fact,
+   and 2.5b adds selection *on top of* it. So the failure path is to remove the top layer and
+   keep running — slower, more context, still correct — with one warning line pointing at
+   `miku reindex`. This generalizes into a constraint on 2.5b as a whole: **selection must be a
+   removable layer, not something woven into the read path.** A design with no route back to
+   full recall converts an index incident into a memory incident.
+
+The string comparison runs when a session opens and costs nothing. The case it cannot catch is a
+provider silently repointing `baai/bge-m3` at a new checkpoint, where every field of the
+fingerprint still matches. That needs a canary — one fixed sentence, embedded and hashed — and a
+canary costs a live embedding call. Charging every session for an event that may never happen is
+the wrong trade, so the canary belongs behind `miku reindex --check`: voluntary, run when someone
+suspects drift, never automatic.
 
 ### UI requirement (Phase 3) — two surfaces, one server
 
@@ -546,12 +655,13 @@ logic from waku transfers essentially unchanged, since it only cares about the e
 
 ## Open questions
 
-- **The pollution spike, open.** Does carrying facts into a turn that does not need them
-  actually change anything? Method: ~15 realistic facts, ~10 unrelated simple turns ("hello",
-  "what is 2+2"), each run with and without facts. Compare replies, watch for the agent
-  volunteering memory unprompted, and watch for a scheduling tool called on a turn about
-  nothing. If the pairs match, pollution is imaginary and clean facts are enough. If they
-  diverge, the number decides between the threshold and memory-as-a-tool above.
+- ~~The pollution spike~~ **closed 2026-08-26** — measured, see above. No gate in 2.5b. What
+  remains open is the same question at scale: the spike ran on 15 clean facts, and nothing has
+  measured 500 contradictory ones.
+- **Embedding checkpoint drift, unprobed.** `miku reindex --check` is the agreed home for a
+  canary, but nothing yet measures whether GreenNode ever repoints a model id at a new
+  checkpoint. Until something does, the risk is acknowledged and unquantified: the fingerprint
+  catches a deliberate model change and misses a silent one.
 - Judge model choice: `openai/gpt-4o-mini` via GreenNode as judge against a
   gemma/qwen agent? Needs a sanity check that the judge is actually stronger than the agent
   on the dimension being judged.
