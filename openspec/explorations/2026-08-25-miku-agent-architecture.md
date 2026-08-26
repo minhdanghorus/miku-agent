@@ -456,7 +456,8 @@ start rather than discovering while writing the first judge eval.
 | 2 | Best-of-N fan-out (`propose_slots` tool wrapping a `Send` subgraph) · per-turn budget · node cache · span/parent tracing |
 | 2.5a | Fact consolidation: supersede / duplicate / merge / expire, tombstoned, behind `miku consolidate` |
 | 2.5b | Selection: embeddings (`bge-m3`), top-k recall, `miku reindex` + index fingerprint. No gate and no threshold - the pollution spike closed that question |
-| 3 | Judge evals (`LLMJudge`) · **UI, two surfaces** (see below) |
+| 3a | Judge evals (`LLMJudge`), judging on gemma. Ungated - the judge-strength spike closed it |
+| 3b | UI: the harness cockpit only. FastAPI + uvicorn, static frontend, no build step. Conversation screen deferred |
 | later | OTel spans · other gateways · guardrails · semantic search over memory |
 
 ### Measured: an unresolved contradiction books the wrong time
@@ -638,6 +639,163 @@ canary costs a live embedding call. Charging every session for an event that may
 the wrong trade, so the canary belongs behind `miku reindex --check`: voluntary, run when someone
 suspects drift, never automatic.
 
+### Memory types: one of three, and why the other two are deferred (2026-08-26)
+
+Measured against waku-agent's taxonomy — episodic, procedural, semantic — miku has **one**.
+`nodes.py` line 132 settles it: the system prompt is persona + facts + today, and nothing that
+does not appear there exists behaviourally.
+
+| waku tier | miku | evidence |
+| --- | --- | --- |
+| semantic | **yes** | `store.py`: `remember` writes, `recall_facts` reads, `consolidate` maintains |
+| episodic | no | — |
+| procedural | no | — |
+| (working) | yes | the checkpointer, but this is not one of the three |
+
+Three things look like memory and are not. The **checkpointer** is context, not recollection: it
+is thread-scoped, never retrieved across threads, never compacted, so a new `miku` invocation
+knows nothing. The rule *"the checkpointer is not for facts"* actively prevents it becoming
+episodic, which means episodic would be a third tier and not an extension of it. **SOUL.md** is
+config — 13 static lines of name and tone that no agent can write. **Traces** are read only by
+`evals/`, never by `miku/`: observability, one-directional.
+
+Sharper than the count: semantic memory here is manually written. `remember` fires only when the
+user asks, so every stored fact is the user's own words and cannot be fabricated.
+
+**Why episodic is deferred rather than next.** Exploring it turned up three things that reversed
+the initial instinct that it should precede 2.5b:
+
+1. **It needs selection; semantic did not.** Facts saturate at tens and consolidation shrinks
+   them, which is why full recall is fine and the pollution spike came back clean. Episodes grow
+   monotonically with *use*, and `expire` cannot apply — a session that happened does not stop
+   having happened. So episodic is not an alternative to 2.5b, it is selection's first real
+   consumer. A recency-only version is buildable today with no embeddings, but it answers "what
+   did we do yesterday" while failing "what did we decide last month", which is the case worth
+   having.
+2. **A thread is not an episode.** `--thread work` is designed to be resumed forever — the real
+   database already has one thread at 113KB of checkpoints — so one-episode-per-thread produces a
+   single ever-growing episode for the channel used most. Session boundaries (open CLI, work,
+   exit) are the human-made alternative and would need a session id the runtime does not yet
+   record. Letting the model choose topic boundaries was rejected: the model deciding the
+   structure of its own memory is the least legible option available.
+3. **It would be the first model-authored memory in the repo.** Every stored fact today is the
+   user's sentence. An episode is a summary the model writes over a transcript no human will
+   read, and its failure mode is worse than forgetting: a false memory asserted confidently, with
+   no traceback and no test that catches it. `SOUL.md` guards against claiming an unperformed
+   action, not against faithfully reporting a fabricated stored one. Provenance
+   (`session_id`, turn range) would be mandatory, not optional — and it makes an episode a
+   *derived* artifact over the checkpointer, rebuildable when the summarising prompt improves,
+   exactly as an embedding is derived over the fact text.
+
+A fourth hazard: episodes and facts would compete across tiers, and `validate_plan` sees facts
+only, so consolidation is structurally blind to it. The cheap mitigation is the repo's own
+measured lesson — a prose boundary in the tool description ("episodes record decisions and
+events, not preferences"), which is what fixed the only genuine misroute in the routing spike.
+
+**The cheaper option that may dominate.** If the felt gap is "Miku does not remember who I am"
+rather than "Miku does not remember what we did", the fix is auto-remember — the agent proposing
+`remember` itself — which is a change to the existing tier, needs no selection, and keeps facts
+as the user's words only if carefully scoped. Those are two different phases, and which gap is
+real has not been established.
+
+**Decision: memory work is deferred to a later phase, and Phase 3 (UI) goes next.** Nothing here
+is blocked or blocking; the reasoning is recorded so it does not have to be rediscovered.
+
+### Measured: the judge could not judge, and `judge` moves to gemma (2026-08-26)
+
+Phase 2 measured `openai/gpt-4o-mini` failing weekday resolution as an *agent*. The open question
+was whether it could still be trusted to *grade*. It cannot, and the failure is worse in kind
+than "weaker".
+
+18 cases across three dimensions, three correct and three deliberately wrong each, driven through
+pydantic-evals' own `judge_input_output` — the exact mechanism 3a would use. Two replications per
+model, 72 model calls.
+
+| | date | habit | plain | total |
+| --- | --- | --- | --- | --- |
+| `gpt-4o-mini` run 1 | 3/6 | 5/6 | 6/6 | 14/18 |
+| `gpt-4o-mini` run 2 | 3/6 | 5/6 | 6/6 | 14/18 |
+| `gemma-4-31b-it` run 1 | 6/6 | 6/6 | 6/6 | **18/18** |
+| `gemma-4-31b-it` run 2 | 6/6 | 6/6 | 6/6 | **18/18** |
+
+**3/6 is not partial competence — it is a constant function.** Printing the raw verdicts shows
+gpt-4o-mini returning `[False, False, False, False, False, False]` on the date dimension in both
+runs: it failed every case, correct and incorrect alike. 3/6 is exactly the accuracy of always
+answering "fail", so the three it "caught" are the same bias landing on the right side by
+accident. On that dimension it is not a weak evaluator; it is not an evaluator.
+
+Its stated reasoning is the part worth keeping. Grading a correct reply that booked Tuesday
+2026-09-01, it wrote that the right date "for the following week" was 2026-09-05 — a Saturday.
+Grading a correct "tomorrow" as 2026-08-27 from a stated today of 2026-08-26, it said that is not
+tomorrow. On a third it conceded the date *was* the Friday asked for and failed it anyway on a
+reason that dissolves on reading. It is not hedging; it is doing calendar arithmetic wrong and
+then ruling confidently on the wrong answer.
+
+The single habit miss has the same root: it flagged 09:30 as violating a *Wednesday afternoon*
+block. So this is not two weak dimensions but one missing capability — temporal reasoning —
+surfacing twice. `plain` (factual correctness and honesty about unperformed actions) needs no
+dates and scored 6/6 for both models.
+
+**The failure direction is the worst one for an eval suite.** A pass-biased judge yields green
+tests over real bugs; a fail-biased judge yields red tests over correct code, and someone spends
+an afternoon debugging an agent that was right while the evaluator was wrong. That is worse than
+having no judge, because a missing evaluator is a known unknown.
+
+**Decision: `judge` moves to `google/gemma-4-31b-it`.** This knowingly trades away the
+descriptor's original rationale — *"a different model than main, on purpose: a model grading its
+own output is a well-known way to get flattering scores"* — which is still a correct principle.
+Two things make the trade acceptable: the alternative is an evaluator that inverts its verdicts,
+and a role remap is one line in `PROVIDERS` with no call site touched, so it is reversible the
+moment a stronger third model is available on this provider.
+
+**What the spike did not measure, and could not.** All 18 cases have objective answers, so
+self-grading bias had nowhere to appear — 2026-09-01 either is a Tuesday or is not, and no amount
+of flattery changes it. The spike measured *capability*, not *bias*. Gemma grading gemma on
+subjective dimensions ("was this reply useful?", "is this Miku's voice?") is untested and is
+exactly where the original concern lives. 3a should therefore lean on the judge for dimensions
+with defensible answers and treat subjective scores as unvalidated until measured separately.
+
+**Two code comments this invalidates**, and 3a has to fix them rather than leave them lying:
+
+1. The `judge` entry in `GREENNODE.models` carries the "a different model than main, on purpose"
+   comment. After the remap that comment describes the opposite of what the code does.
+2. `consolidate.py` explains `CONSOLIDATION_ROLE = "main"` partly by rejecting `judge`: *"it
+   exists so evaluation is graded by a model other than the one being graded, and borrowing it
+   for production work would make that claim ambiguous."* The decision stays right, but once
+   `judge` resolves to the same model as `main` that particular reason no longer distinguishes
+   anything and needs restating.
+
+A third consequence, not a defect: three of four roles now resolve to gemma, so the role seam
+carries even less real variation than before. It stays worth having for the reason it always was —
+`resolve_model` is where a second provider plugs in — but nothing currently exercises it.
+
+### Phase 3 scope decisions (2026-08-26)
+
+Phase 3 as written bundled two unrelated pieces of work. Split, and the order chosen was judge
+evals first:
+
+- **3a — judge evals.** Smaller and lower risk, but it is the half carrying an open question:
+  whether `openai/gpt-4o-mini` is actually stronger than gemma on the dimension being judged. A
+  judge weaker than the agent produces confident scores that mean nothing, so that check gates
+  the change rather than riding inside it.
+- **3b — the cockpit only.** The 'watch it think' surface, and the one that cashes in the
+  span/parent tracing built in Phase 2: a fan-out turn already emits ~13 trace records with
+  nothing to look at. The conversation screen is deferred — `thread_id` is already the key it
+  needs, so nothing is lost by waiting.
+
+**Dependencies: FastAPI + uvicorn, and nothing else.** The frontend is static HTML/CSS/JS served
+by the same server — no npm, no bundler, no build step inside a uv-managed Python repo. The doc's
+transport analysis already holds: SSE over a POST fetch, one connection per turn, `{kind, ...}`
+JSON events, fed from `astream_events`. waku's event-application logic transfers because it only
+cares about the event shape. A frontend toolchain was considered and rejected: legibility is the
+constraint this repo optimises for, and a build step is the fastest way to lose it.
+
+The real test of 3b is not the UI. It is whether the Phase 1 gateway constraint paid off —
+`cli.py` moves text only, no prompt assembly, no model calls, no tool execution, no memory reads,
+specifically so a second gateway would be cheap. That claim has never been cashed. If the web
+gateway needs to reach past `open_session` for anything, the seam is in the wrong place, and it is
+better to learn that now than under another phase of weight.
+
 ### UI requirement (Phase 3) — two surfaces, one server
 
 Both live in the same local web app:
@@ -662,9 +820,9 @@ logic from waku transfers essentially unchanged, since it only cares about the e
   canary, but nothing yet measures whether GreenNode ever repoints a model id at a new
   checkpoint. Until something does, the risk is acknowledged and unquantified: the fingerprint
   catches a deliberate model change and misses a silent one.
-- Judge model choice: `openai/gpt-4o-mini` via GreenNode as judge against a
-  gemma/qwen agent? Needs a sanity check that the judge is actually stronger than the agent
-  on the dimension being judged.
+- ~~Judge model choice~~ **closed 2026-08-26** — measured, see above. `judge` moves to gemma.
+  What stays open is the half the spike could not test: self-grading bias on *subjective*
+  dimensions, which objective cases cannot detect by construction.
 - Does GreenNode support prompt caching? Unprobed.
 - Where the fan-out subgraph gets its tracer and budget. `Deps` reaches the parent graph's
   nodes; the subgraph sits inside a tool, so either the tool closure receives them at build
