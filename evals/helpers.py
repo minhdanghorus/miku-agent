@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +18,19 @@ def has_credentials() -> bool:
 
 
 SKIP_REASON = f"no live provider credentials ({GREENNODE.key_env} unset)"
+
+
+def has_web_extra() -> bool:
+    """Whether the web gateway's optional dependencies are installed.
+
+    The same shape as `has_credentials`: an optional capability the suite skips
+    around rather than fails on, so `uv sync --extra dev` alone stays a working
+    install.
+    """
+    return importlib.util.find_spec("fastapi") is not None
+
+
+WEB_SKIP_REASON = "the web extra is not installed (uv sync --extra web)"
 
 
 @dataclass

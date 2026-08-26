@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>miku cockpit</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>miku <span class="dim">cockpit</span></h1>
+      <p class="dim" id="status">idle</p>
+    </header>
+
+    <form id="composer" autocomplete="off">
+      <input
+        id="message"
+        type="text"
+        placeholder="ask miku something, and watch the turn"
+        aria-label="message"
+      />
+      <button type="submit">send</button>
+    </form>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab" data-pane="live" role="tab" aria-selected="true">live turn</button>
+      <button class="tab" data-pane="traces" role="tab" aria-selected="false">traces</button>
+      <button class="tab" data-pane="config" role="tab" aria-selected="false">config</button>
+      <button class="tab" data-pane="tools" role="tab" aria-selected="false">tools</button>
+      <button class="tab" data-pane="memory" role="tab" aria-selected="false">memory</button>
+    </nav>
+
+    <main>
+      <section id="pane-live" class="pane" data-pane="live">
+        <div id="reply" class="reply" hidden></div>
+        <div id="live-tree" class="tree"><p class="dim">no turn yet.</p></div>
+      </section>
+
+      <section id="pane-traces" class="pane" data-pane="traces" hidden>
+        <div class="split">
+          <ul id="turn-list" class="turns"></ul>
+          <div id="trace-tree" class="tree"><p class="dim">pick a turn.</p></div>
+        </div>
+      </section>
+
+      <section id="pane-config" class="pane" data-pane="config" hidden></section>
+      <section id="pane-tools" class="pane" data-pane="tools" hidden></section>
+      <section id="pane-memory" class="pane" data-pane="memory" hidden></section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,230 @@
+/* One stylesheet, no build step, no framework.
+   An instrument, not a product: dense, legible, monospace where it carries
+   meaning. */
+
+:root {
+  --bg: #10131a;
+  --panel: #161b24;
+  --line: #232b38;
+  --ink: #d7dee9;
+  --dim: #7c8798;
+  --accent: #3ddad7;
+  --warn: #ffb454;
+  --bad: #ff6b6b;
+  --branch: #b48ead;
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 1.25rem clamp(1rem, 4vw, 2.5rem) 3rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 var(--mono);
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.75rem;
+}
+
+h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+}
+
+.dim {
+  color: var(--dim);
+}
+
+#composer {
+  display: flex;
+  gap: 0.5rem;
+  margin: 1rem 0;
+}
+
+#message {
+  flex: 1;
+  padding: 0.6rem 0.8rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+}
+
+#message:focus {
+  outline: 1px solid var(--accent);
+}
+
+button {
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button[disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--dim);
+  padding: 0.5rem 0.9rem;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.pane {
+  padding-top: 1rem;
+}
+
+.reply {
+  background: var(--panel);
+  border-left: 2px solid var(--accent);
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  white-space: pre-wrap;
+}
+
+/* --- the causal tree ----------------------------------------------------- */
+
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 1.1rem;
+  border-left: 1px solid var(--line);
+}
+
+.tree > ul {
+  border-left: none;
+  padding-left: 0;
+}
+
+.node {
+  padding: 0.15rem 0;
+}
+
+.kind {
+  color: var(--accent);
+}
+
+.kind.tool_call {
+  color: var(--warn);
+}
+
+.kind.error,
+.node .failed {
+  color: var(--bad);
+}
+
+.branch {
+  color: var(--branch);
+}
+
+.detail {
+  color: var(--dim);
+}
+
+.split {
+  display: grid;
+  grid-template-columns: minmax(9rem, 14rem) 1fr;
+  gap: 1.25rem;
+}
+
+.turns {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.turns li button {
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--dim);
+  padding: 0.3rem 0.4rem;
+}
+
+.turns li button[aria-current="true"],
+.turns li button:hover {
+  color: var(--accent);
+  background: var(--panel);
+}
+
+/* --- read-only tabs ------------------------------------------------------ */
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.35rem 0.8rem 0.35rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  color: var(--dim);
+  font-weight: normal;
+}
+
+td.wrap {
+  white-space: pre-wrap;
+  font-family: system-ui, sans-serif;
+  color: var(--dim);
+}
+
+h2 {
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 1.5rem 0 0.5rem;
+}
+
+h2:first-child {
+  margin-top: 0;
+}
+
+@media (max-width: 40rem) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}

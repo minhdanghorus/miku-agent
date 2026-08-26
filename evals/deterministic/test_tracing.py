@@ -236,3 +236,109 @@ def test_a_span_is_returned_even_when_the_write_fails(tmp_path):
 
     span = tracer.event("node", node="agent")
     assert span  # parentage must survive a broken sink
+
+
+# --- A tool call, traced when it is requested -------------------------------
+#
+# These drive a real turn rather than a bare tracer, because the claim is about
+# where the event comes from. It used to be synthesised by the session from the
+# graph's update stream and handed straight to the listener, which meant it had
+# no span to hang under and never passed redaction. Asserting it on a tracer in
+# isolation would not have caught either.
+
+from evals.helpers import StubModel, says, wants  # noqa: E402
+from miku.gateway.cli import print_tool_activity  # noqa: E402
+from miku.runtime.config import load_settings  # noqa: E402
+from miku.runtime.session import open_session  # noqa: E402
+from miku.tools.clock import Clock  # noqa: E402
+
+TURN_CLOCK = Clock.fixed("2026-08-25")  # a Tuesday
+
+
+def booking_model() -> StubModel:
+    return StubModel(
+        [
+            wants("create_event", {"title": "Tennis", "day": "2026-08-29", "start_time": "08:00"}),
+            says("Booked Tennis for Saturday at 08:00."),
+        ]
+    )
+
+
+@pytest.fixture
+def turn_settings(tmp_path):
+    return load_settings(state_dir=tmp_path / "state", user_id="tester", max_iterations=3)
+
+
+async def test_a_requested_tool_call_is_traced_with_its_arguments(turn_settings):
+    async with open_session(turn_settings, model=booking_model(), clock=TURN_CLOCK) as session:
+        result = await session.run_turn("book tennis saturday 8am", thread_id="t1")
+        trace_path = session.deps.tracer.path
+
+    records = read_records(trace_path, turn_id=result.turn_id)
+    requested = [record for record in records if record["kind"] == "tool_call"]
+
+    assert len(requested) == 1
+    assert requested[0]["tool"] == "create_event"
+    assert requested[0]["args"]["title"] == "Tennis"
+
+
+async def test_a_requested_call_and_its_outcome_share_a_parent(turn_settings):
+    """The pair is the point: what was asked, and how it went, under one step."""
+    async with open_session(turn_settings, model=booking_model(), clock=TURN_CLOCK) as session:
+        result = await session.run_turn("book tennis saturday 8am", thread_id="t1")
+        trace_path = session.deps.tracer.path
+
+    records = read_records(trace_path, turn_id=result.turn_id)
+    requested = next(record for record in records if record["kind"] == "tool_call")
+    outcome = next(record for record in records if record["kind"] == "tool")
+
+    assert requested["parent"] == outcome["parent"]
+    assert requested["parent"] in {record["span"] for record in records}
+
+
+async def test_a_watcher_never_sees_unredacted_tool_arguments(turn_settings, monkeypatch):
+    """The hole this change closed, pinned so it cannot reopen.
+
+    The secret is planted in a tool argument, which is the one payload that used
+    to reach a listener without passing the sink.
+    """
+    from miku.runtime.providers import GREENNODE
+
+    secret = "sk-not-a-real-key-9f3a2b7c"
+    monkeypatch.setenv(GREENNODE.key_env, secret)
+
+    model = StubModel(
+        [
+            wants("remember", {"fact": f"my provider key is {secret}"}),
+            says("Noted."),
+        ]
+    )
+
+    seen: list[dict] = []
+    async with open_session(turn_settings, model=model, clock=TURN_CLOCK) as session:
+        await session.run_turn(
+            "remember my key", thread_id="t1", on_event=lambda kind, payload: seen.append(payload)
+        )
+
+    assert seen, "the watcher saw nothing at all"
+    assert not any(secret in json.dumps(payload, default=str) for payload in seen)
+    assert any(REDACTED in json.dumps(payload, default=str) for payload in seen)
+
+
+async def test_the_terminal_still_shows_tool_activity_from_a_real_turn(
+    turn_settings, capsys
+):
+    """`cli.py` is expected to need no edit -- expected, so asserted.
+
+    The existing CLI cases call the printer with a hand-built payload, which
+    would keep passing even if nothing fed it any more. This drives the printer
+    from a real turn's stream.
+    """
+    async with open_session(turn_settings, model=booking_model(), clock=TURN_CLOCK) as session:
+        await session.run_turn(
+            "book tennis saturday 8am", thread_id="t1", on_event=print_tool_activity
+        )
+
+    printed = capsys.readouterr().out
+    assert "create_event" in printed
+    assert "Tennis" in printed

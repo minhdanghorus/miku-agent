@@ -227,6 +227,15 @@ def make_tools_node(deps: Deps):
 
         for call in calls:
             name = call["name"]
+            # Requested, not yet run. Emitted here rather than synthesised by the
+            # gateway so it carries a span and a parent like every other event --
+            # a live UI cannot place a node with no parent -- and so the
+            # arguments pass through the sink's redaction on their way to any
+            # watcher. The pair is deliberate: this records what was asked, and
+            # `tool_event` below records how it went, both under `span`.
+            turn.tracer.event(
+                "tool_call", node="tools", parent=span, tool=name, args=call["args"]
+            )
             try:
                 tool = lookup(deps.tools, name)
                 output = await tool.ainvoke(call["args"], config)

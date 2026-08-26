@@ -811,6 +811,75 @@ Transport, per the earlier handoff analysis: SSE over a POST fetch, one connecti
 carry over — FastAPI/starlette, fed from `astream_events`. The frontend event-application
 logic from waku transfers essentially unchanged, since it only cares about the event shape.
 
+### Measured: the Phase 1 gateway claim, cashed (2026-08-26)
+
+Phase 1 shaped `cli.py` around a constraint — it moves text only: no prompt assembly, no
+model calls, no tool execution, no memory reads — justified entirely by a claim about the
+future: *that is what makes a second gateway cheap*. Phase 3b built the second gateway. The
+claim was never tested until then, and a constraint defended by an untested prediction is
+the kind of thing a repo carries for years without noticing it was wrong.
+
+**`cli.py` needed zero edits.** Not one line. It was expected to need none — its
+`print_tool_activity` keys on `kind == "tool_call"`, and that kind survived being moved onto
+the tracer — but expectation is not measurement, so a case now drives the terminal printer
+from a real turn's event stream rather than from a hand-built payload. The previous CLI
+cases would have kept passing even if nothing fed the printer at all.
+
+**The turn path needed nothing beyond the two documented symbols.** `open_session(settings)`
+and `run_turn(message, thread_id, on_event)` were the entire contract. Streaming a turn to a
+browser required no new hook, no signature change, and no access to anything the session did
+not already expose. The `on_event` seam — added in Phase 2 so the terminal could watch a
+fan-out running inside a tool — turned out to be exactly the shape SSE wants. The only
+mismatch was direction: `run_turn` pushes synchronously, SSE pulls asynchronously, and an
+`asyncio.Queue` with a sentinel is the whole adapter.
+
+**The inspection path reached past it twice.** `session.deps.tools` and
+`session.deps.store`. Both are reads into `Deps`, which is internal wiring, and both exist
+because `Session` exposes no accessor for its tool list or its store handle. Two properties
+on `Session` would close it. They were deliberately not added, because adding them would
+have erased the measurement this phase was run to take.
+
+So the honest score is **zero on the turn path, two on the introspection path**, and the
+distinction is the useful part. Phase 1's constraint was written about conversation and
+holds perfectly there. It was silent about a gateway that *displays* the system rather than
+talking to it, and that is where the seam frayed — not badly, and not in a way that touched
+the loop, but the wording in the `cli-gateway` spec ("reads no memory") was broader than
+what Phase 1 had actually earned.
+
+`runtime/inspect.py` is the answer chosen over widening that wording: read-only,
+environment-free, both gateways may call it, and a `miku inspect` subcommand later needs
+nothing new. The alternative — let the gateway query the store and amend the spec to say
+"no memory reads on the turn path" — is arguably the more honest reading of what the
+constraint always meant, and it lost on the grounds that the reading has two consumers
+already.
+
+**What else the phase measured.**
+
+- **Concurrency, previously untested.** Two turns overlapping on one session both reply,
+  spend separate allowances (1 and 2 requests, not 3 and 3), and write no event under the
+  other's turn id. The shared SQLite store and checkpointer handles took it. No lock was
+  needed and none was added. It took three attempts to get a result worth trusting: the
+  first fixture did not overlap at all (the stub never awaits, so the first turn ran to
+  completion before the second began — seven records, one switch), and the second made
+  overlap *likely* rather than certain and failed one run in eight. The turns now
+  rendezvous, so failure to overlap is a timeout rather than a coin flip. Scope: two turns,
+  one process, stubbed models. Not many turns, not real latency, and not write contention.
+- **Trace volume after moving `tool_call` onto the tracer.** A turn with one tool call goes
+  from 5 records to 6; a fan-out turn from 13 to 14; a turn that calls no tool is unchanged
+  at 2. The estimate that produced those numbers did not distinguish the last case.
+- **A redaction hole that had been open since Phase 1.** `tracing.py` promises a listener
+  *"sees exactly what the file sees — never the raw payload — so a listener cannot become a
+  second way to leak a key."* The session synthesised the `tool_call` event and handed the
+  arguments straight to the listener, bypassing `_redact` entirely. Inert while the only
+  listener printed to the user's own terminal; exactly the scenario the comment denies once
+  a listener pushes bytes over a socket. Found by reading the code before designing, not by
+  a test — nothing had been written that could fail.
+
+**What is unverified.** Nobody has loaded the page in a browser. `buildTree` and the
+renderer are exercised under node — out-of-order branches, an orphaned record, escaping —
+which is stronger than eyeballing for correctness, but says nothing about layout, contrast,
+or whether the thing is pleasant to watch.
+
 ## Open questions
 
 - ~~The pollution spike~~ **closed 2026-08-26** — measured, see above. No gate in 2.5b. What

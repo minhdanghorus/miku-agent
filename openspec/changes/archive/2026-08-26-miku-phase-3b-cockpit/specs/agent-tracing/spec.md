@@ -1,33 +1,36 @@
-# Agent Tracing
+## ADDED Requirements
 
-## Purpose
+### Requirement: A running turn is observable through the sink
 
-The observability sink: one JSON object per line, one line per node transition.
+The system SHALL allow a caller to observe a turn's events as they are recorded, so that a
+gateway can show progress while a turn runs rather than only its final reply. Observation
+SHALL be per turn, so that concurrent turns do not deliver each other's events.
 
-Two properties are load-bearing. Redaction happens inside the sink rather than at call
-sites, so no caller can leak a secret by forgetting. And a tracing failure never breaks a
-turn - observability is not a correctness dependency.
+Observation SHALL be the only mechanism a gateway uses to watch a turn. Events produced
+inside delegated work — a subgraph reached through a tool, invisible to the parent graph's
+own update stream — SHALL reach an observer by this route like any other event.
 
-The event shape is chosen so a turn can be reconstructed from the file alone.
+An observer SHALL NOT be able to affect the turn. If observation raises, the turn SHALL
+continue and produce its reply, on the same terms as a failed write.
 
-## Requirements
+#### Scenario: Delegated work reaches an observer
 
-### Requirement: Every node transition is traced to a JSONL file
+- **WHEN** a turn delegates to a fan-out subgraph while an observer is attached
+- **THEN** the observer receives the subgraph's branch events
+- **AND** each carries the same causing event and a distinct branch identifier
 
-The system SHALL append one JSON object per line to a trace file for each node transition of
-every turn. Trace files SHALL live under the runtime state directory, partitioned by date.
+#### Scenario: Concurrent turns do not cross observers
 
-#### Scenario: A turn produces a readable trace
+- **WHEN** two turns run at once, each with its own observer
+- **THEN** no observer receives an event carrying the other turn's identifier
 
-- **WHEN** a turn runs to completion
-- **THEN** the day's trace file contains one line per node transition of that turn
-- **AND** every line parses as JSON on its own
+#### Scenario: A failing observer does not break the turn
 
-#### Scenario: Traces accumulate across turns and runs
+- **WHEN** an attached observer raises on every event
+- **THEN** the turn still completes and returns a reply
+- **AND** the trace file still contains the turn's events
 
-- **WHEN** several turns run, the process restarts, and another turn runs on the same day
-- **THEN** all turns' events are present in the same day's file, appended in order
-- **AND** no earlier content is overwritten
+## MODIFIED Requirements
 
 ### Requirement: Trace events carry enough context to reconstruct a turn
 
@@ -119,44 +122,3 @@ secret escapes.
 - **WHEN** a payload containing a secret is redacted
 - **THEN** the written line is still valid JSON
 - **AND** the event's other fields are unchanged
-
-### Requirement: Tracing failures never break a turn
-
-If writing a trace event fails, the turn SHALL continue and produce its reply. Tracing is
-observability, not a dependency of correctness.
-
-#### Scenario: The trace file cannot be written
-
-- **WHEN** the trace destination is not writable during a turn
-- **THEN** the turn still completes and returns a reply
-- **AND** the failure surfaces as a warning rather than an exception to the user
-
-### Requirement: A running turn is observable through the sink
-
-The system SHALL allow a caller to observe a turn's events as they are recorded, so that a
-gateway can show progress while a turn runs rather than only its final reply. Observation
-SHALL be per turn, so that concurrent turns do not deliver each other's events.
-
-Observation SHALL be the only mechanism a gateway uses to watch a turn. Events produced
-inside delegated work — a subgraph reached through a tool, invisible to the parent graph's
-own update stream — SHALL reach an observer by this route like any other event.
-
-An observer SHALL NOT be able to affect the turn. If observation raises, the turn SHALL
-continue and produce its reply, on the same terms as a failed write.
-
-#### Scenario: Delegated work reaches an observer
-
-- **WHEN** a turn delegates to a fan-out subgraph while an observer is attached
-- **THEN** the observer receives the subgraph's branch events
-- **AND** each carries the same causing event and a distinct branch identifier
-
-#### Scenario: Concurrent turns do not cross observers
-
-- **WHEN** two turns run at once, each with its own observer
-- **THEN** no observer receives an event carrying the other turn's identifier
-
-#### Scenario: A failing observer does not break the turn
-
-- **WHEN** an attached observer raises on every event
-- **THEN** the turn still completes and returns a reply
-- **AND** the trace file still contains the turn's events

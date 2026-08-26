@@ -68,10 +68,10 @@ class Session:
         """One user message in, one reply out.
 
         `on_event` is how a gateway watches progress. It is called with the
-        `{kind, ...}` trace records themselves, plus a `tool_call` event carrying
-        the arguments before a tool runs, so a terminal and a future browser UI
-        can be fed from one stream. Nodes inside a delegated subgraph reach it
-        only this way.
+        `{kind, ...}` trace records themselves and with nothing else, so a
+        terminal and a browser are fed from one stream and every record a
+        watcher sees has passed the sink. Nodes inside a delegated subgraph
+        reach it only this way.
         """
         turn_id = new_turn_id()
         # One tracer and one budget per turn, cloned rather than reset in place.
@@ -100,10 +100,13 @@ class Session:
                 iterations = patch.get("iterations", iterations)
 
                 for produced in patch.get("messages", []):
-                    for call in getattr(produced, "tool_calls", []) or []:
-                        tool_calls.append(call)
-                        if on_event:
-                            on_event("tool_call", {"tool": call["name"], "args": call["args"]})
+                    # Collected for TurnResult, which is what evals assert on.
+                    # Nothing is announced from here: the tools node traces each
+                    # call as it is requested, so a watcher already sees it --
+                    # with a parent, and redacted. Announcing it a second time
+                    # from outside the sink is how the raw arguments used to
+                    # escape.
+                    tool_calls.extend(getattr(produced, "tool_calls", []) or [])
                     if isinstance(produced, AIMessage) and produced.content:
                         reply = str(produced.content)
 

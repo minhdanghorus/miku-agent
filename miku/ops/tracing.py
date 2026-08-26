@@ -82,6 +82,14 @@ class Tracer:
     # Called with every redacted record, for a gateway watching progress. It
     # sees exactly what the file sees -- never the raw payload -- so a listener
     # cannot become a second way to leak a key.
+    #
+    # That held only because nothing bypassed the sink, and for a while
+    # something did: the session synthesised a `tool_call` event from the
+    # graph's update stream and handed the arguments straight to the listener,
+    # unredacted. Harmless while the only listener printed to the user's own
+    # terminal, and exactly the hole this comment denies once a listener starts
+    # pushing bytes over a socket. The tools node emits that event now, so the
+    # guarantee is structural again rather than aspirational.
     listener: Callable[[dict], None] | None = None
     warn_stream = sys.stderr
 

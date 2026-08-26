@@ -19,7 +19,16 @@ considered and rejected there for stated reasons.
 ## Architecture map (box -> file)
 
 - `miku/gateway/cli.py` — the terminal. Moves text only: no prompt assembly, no model calls,
-  no tool execution, no memory reads. That constraint is what makes a second gateway cheap.
+  no tool execution, no memory reads. That constraint is what makes a second gateway cheap —
+  and it paid: Phase 3b added one without editing a line of this file.
+- `miku/gateway/web.py` — the cockpit's server, a **peer** of the terminal and not a
+  subcommand of it. No import edge either way. `POST /api/turn` streams a turn as SSE by
+  bridging the same `on_event` seam into an `asyncio.Queue`; the read endpoints call
+  `inspect.py` and never the store. `miku/gateway/static/` is the frontend: hand-written
+  HTML/CSS/ES-modules, no build step.
+- `miku/runtime/inspect.py` — the read-only view every gateway renders (config, tools,
+  memory, traces). Read-only and environment-free by construction, both pinned by tests. It
+  exists so that a memory tab does not make a gateway a place memory is read.
 - `miku/runtime/config.py` — every knob, `MIKU_`-prefixed. **Nothing else reads the
   environment**, except `providers.py` reading the provider key.
 - `miku/runtime/providers.py` — the provider adapter. Roles
@@ -45,7 +54,9 @@ considered and rejected there for stated reasons.
   `registry.py` and the injectable `clock.py`. `proposals.py` is the delegating tool; it needs
   the whole session, so `open_session` appends it after `Deps` exists.
 - `miku/ops/tracing.py` — JSONL sink with redaction inside the sink, `span`/`parent` parentage,
-  and a `listener` seam the gateway watches. `miku/ops/traceview.py` — reading a trace back as
+  and a `listener` seam the gateways watch. Everything a watcher sees has passed the sink;
+  that was aspirational until Phase 3b, when the one event bypassing it was moved onto the
+  tracer. `miku/ops/traceview.py` — reading a trace back as
   a tree.
 - `miku/SOUL.md` — the persona: name and tone only.
 - `evals/deterministic/` — tests. `evals/task.py` is the single task function cases drive;
@@ -59,12 +70,15 @@ considered and rejected there for stated reasons.
 Python 3.13, managed with `uv`.
 
 ```bash
-uv sync --extra dev        # install
+uv sync --extra dev              # install (CLI + evals)
+uv sync --extra dev --extra web  # add the web gateway (fastapi, uvicorn)
 uv run miku                # talk to Miku (new thread)
 uv run miku --thread work  # resume a named conversation
+uv run miku-web            # the cockpit on http://127.0.0.1:8765 (needs --extra web)
 uv run pytest              # the whole suite
 uv run pytest -k live      # only the cases that call the real provider (judged cases included)
 uv run pytest evals/deterministic/test_fanout.py   # fan-out shape, no credentials
+uv run pytest evals/deterministic/test_web.py      # the web gateway, in-process, no port
 uv run miku consolidate            # show what tidying memory would do (writes nothing)
 uv run miku consolidate --apply    # actually resolve them
 uv run ruff check .        # lint (must be clean)
@@ -111,6 +125,20 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
   stylistic: adding that one sentence to a description is what fixed the only genuine misroute
   in the routing spike. Tool boundaries live in prose, never in routing code — no classifier
   node decides which tool to use.
+- **A gateway moves data; it never reads a source directly.** The rule the CLI has always
+  followed, restated now that a second gateway exists and needs to *display* things the CLI
+  never did. Reads go through `runtime/inspect.py`, which is read-only and takes `Settings`
+  and a store handle rather than resolving either itself. The tempting alternative — let the
+  web gateway query the store and reword the constraint to "no memory reads on the turn
+  path" — was rejected because the reading already has two plausible consumers.
+- **Gateways are peers and must not import each other.** `miku` and `miku-web` are separate
+  console scripts over one `open_session`. A test asserts the import edge stays absent,
+  because the moment one gateway imports the other, "add a third" stops being cheap.
+- **Everything a watcher sees passes the sink.** No component announces an event to
+  `on_event` directly; it emits through the tracer, which redacts first. This was violated
+  once — the session synthesised `tool_call` and handed raw arguments to the listener —
+  and the violation was invisible for two phases because the only listener printed to the
+  user's own terminal.
 - **Session-lived things go in `Deps`; turn-lived things go in `TurnContext`.** A session serves
   many turns and will serve them concurrently. A budget or tracer in `Deps` is a bug waiting
   for the web gateway.
@@ -164,4 +192,27 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 - `main` defaults to `google/gemma-4-31b-it`. Measured, not assumed: `openai/gpt-4o-mini`
   fails the weekday-resolution cases (it books "Saturday" as a Thursday). `gemma` resolves
   fan-out windows correctly too ("next week" -> the right Monday).
-- A fan-out turn costs 8 requests and ~13 trace lines, against 2 and ~5 for a plain turn.
+- A fan-out turn costs 8 requests and ~14 trace lines, against 2 and ~6 for a plain
+  scheduling turn. A turn that calls no tool is unchanged at 2. The +1 is the `tool_call`
+  event moving onto the tracer in Phase 3b.
+- Trace files now carry tool arguments — event titles, remembered facts — which they did not
+  before Phase 3b. Redaction masks configured secrets, not user content, and `.miku/` is
+  gitignored. Accepted deliberately: masking user text would make the trace useless for the
+  thing it exists for. Nothing rotates these files.
+- Concurrency is measured at exactly two turns, one process, stubbed models. That is enough
+  to prove the shared SQLite store and checkpointer handles are not obviously wrong, and not
+  enough to say anything about many turns, real provider latency, or write contention. It
+  will need re-measuring when 2.5b puts an index on the write path.
+- The web gateway reaches past `open_session` twice — `session.deps.tools` and
+  `session.deps.store`, both for the inspection surface, because `Session` exposes no
+  accessor for either. Two properties would close it. They were not added, deliberately: the
+  count is the measurement Phase 3b existed to take, and hiding it would have wasted the
+  phase.
+- The cockpit has never been looked at in a browser. `buildTree` and the renderer are
+  exercised under node — out-of-order branches, orphaned records, escaping — so correctness
+  is covered and *appearance* is not.
+- No conversation screen. The cockpit watches turns; it does not list past ones or let you
+  resume them from the browser. `thread_id` is already the key that view needs, so waiting
+  costs nothing.
+- The web gateway binds loopback, has no authentication, and serves one local user. It is
+  not built to be exposed and should not be.
