@@ -38,9 +38,38 @@ def new_thread_id() -> str:
 
 
 def print_tool_activity(kind: str, payload: dict) -> None:
-    """Show what the agent is doing while it does it."""
+    """Show what the agent is doing while it does it.
+
+    Fed from two places: a `tool_call` event before a tool runs (which carries
+    the arguments), and the turn's trace records. A fan-out lives entirely in a
+    subgraph inside a tool, so without the trace the terminal would go quiet for
+    six model calls and then print an answer.
+
+    Branches arrive in whatever order they finish. Each line names its branch, so
+    interleaving reads as interleaving rather than as confusion.
+    """
+    node = payload.get("node", "")
+
     if kind == "tool_call":
         print(f"  > {payload['tool']}({_short(payload['args'])})")
+    elif kind == "clamp":
+        print(f"    ... narrowed to {payload['using']} of {payload['asked']} "
+              f"({payload['reason']})")
+    elif kind == "budget":
+        print("    ... request budget spent")
+    elif node == "plan_angles":
+        print(f"    ... exploring {payload.get('branches', 0)} options in parallel")
+    elif node == "generate":
+        branch = payload.get("branch", "?")
+        if payload.get("ok"):
+            print(f"    [{branch}] {payload.get('angle', '')}: "
+                  f"{payload.get('day', '')} {payload.get('start_time', '')}")
+        else:
+            print(f"    [{branch}] no usable slot")
+    elif node == "select_best" and payload.get("candidates"):
+        of = payload["candidates"]
+        how = "judged" if payload.get("judged") else "only option"
+        print(f"    ... picked option {payload.get('chosen', 0)} of {of} ({how})")
 
 
 def _short(args: dict, limit: int = 60) -> str:

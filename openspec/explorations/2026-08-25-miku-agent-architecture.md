@@ -212,6 +212,182 @@ tool domain instead of two, and the selection step naturally pulls long-term mem
 The joke example remains the clearest way to *explain* the pattern, but it is not what gets
 built.
 
+### Fan-out routing: what makes it happen (spike, 2026-08-25, verified live)
+
+The `Send` diagram above says *how* a fan-out runs. It does not say *what triggers one*. Three
+candidate answers, and they differ in where the decision lives:
+
+| | Mechanism | Cost | Determinism |
+|---|---|---|---|
+| 1. User forces it | a CLI flag or keyword | none | total, but it is not product behaviour |
+| 2. Router node | a classifier node before `agent` | +1 LLM call every turn | routing logic drifts from the model that must honour it |
+| 3. Fan-out is a tool | `propose_slots` bound alongside the others | none | the model decides by picking a tool, which it already does |
+
+**Decided: 3.** Choosing a tool *is already* the model's decision-making surface; a router node
+reinvents it. It also leaves the Phase 1 graph untouched: `agent -> tools -> agent` and
+`route_after_agent` do not change, so none of the seven capability specs are disturbed. And
+the cost question answers itself, because a model simply does not reach for the tool when
+greeted with "hi".
+
+The `Send` machinery still gets built and still gets learned — the tool's body is a compiled
+**subgraph** that fans out internally:
+
+```
+   MAIN GRAPH (unchanged from Phase 1)
+   assemble --> agent <==> tools --> END
+                            |
+                            | tool "propose_slots"
+                            v
+   SUBGRAPH (new in Phase 2)
+   plan_angles --Send xN--> [generate] --> gather --> select_best
+```
+
+One consequence to design around: `make_tools_node` coerces every result with `str(output)`,
+and a subgraph returns a state dict. The subgraph must format its own answer before returning,
+rather than the tools node learning to tell two kinds of tool apart. Keeping that knowledge
+out of the node is what preserves its one-screen legibility.
+
+#### What the spike measured
+
+`gemma-4-31b-it`, the three real Phase 1 tools plus a stubbed `propose_slots`, ten prompts,
+three runs each, two wordings of the tool description. **The model returned an identical
+choice on all three runs of every case** — tool selection here is not a coin flip.
+
+On unambiguous prompts, routing was correct every time: prompts carrying a day and a time went
+to `create_event`, prompts with no time went to `propose_slots`, a greeting called nothing.
+
+Two apparent failures were not routing failures, which is only visible by reading the replies
+rather than the tool names:
+
+- *"book tennis with Raj saturday 8am"* returned no tool call and said: "I can't do that.
+  You've told me you dislike meetings before 9am. Are you sure you want it at 8am?" A stored
+  fact suppressed the action. That is the behaviour we want.
+- *"give me 5 options for lunch with Anna"* was a bad test case — the model read "options" as
+  restaurants, not time slots, and declined to invent restaurants.
+
+One genuine miss, and the fix locates the real design lever:
+
+| Tool description | *"when should I schedule the dentist next week?"* |
+|---|---|
+| States only what the tool does | no tool call — "I don't have access to your dentist's availability" |
+| Also states when **not** to use it | calls `propose_slots` |
+
+The added sentence was: "Do NOT use this when the user already said when - use create_event
+for that." **The boundary between two overlapping tools lives in prose, not in control flow.**
+That is a good place for it: prose is editable in seconds and assertable against a stub model
+with no credentials.
+
+Three things to carry into the Phase 2 design:
+
+1. Any tool whose scope overlaps another **must say when not to use it**. Worth a rule in
+   CLAUDE.md.
+2. Long-term memory can *suppress* a tool call, not merely inform one. With fan-out, decide
+   deliberately whether facts apply when choosing the tool, when scoring candidates in
+   `select_best`, or both.
+3. Live evals for fan-out will not be as noisy as feared.
+
+What the spike does **not** establish: one model, ten prompts, N=3. The stub was never
+executed, so argument quality is unmeasured. Two fan-out tools competing was not tried, and
+neither was a fully underspecified request ("set up coffee with Nam").
+
+### Tracing a fan-out: two fields, not a new format
+
+A flat line-per-event log carries causality in its line order. That holds for a linear loop
+(`assemble -> agent -> tools -> agent`) and breaks the moment five branches run concurrently:
+five identical `generate` lines, no way to tell which belongs to which branch, and line order
+now records arrival, not causation.
+
+Interleaving is the only symptom. There is no write race — LangGraph is single-threaded
+asyncio, so `Send` gives concurrency, not parallelism, and no two writes overlap.
+
+The fix keeps the format and adds parentage: `span` (this event's id) and `parent` (the id of
+the event that caused it), plus `branch` on fan-out nodes. The tree is not stored; it is
+*reconstructed* from the parent links, so out-of-order arrival is harmless.
+
+```jsonl
+{"span":"b0","parent":"a3","node":"plan_angles","angles":5}
+{"span":"b1","parent":"b0","node":"generate","branch":0,"angle":"early morning"}
+{"span":"b3","parent":"b0","node":"generate","branch":2,"angle":"avoid busy days"}
+{"span":"b2","parent":"b0","node":"generate","branch":1,"angle":"after lunch"}
+{"span":"b6","parent":"b0","node":"select_best","chose":2}
+```
+
+Rejected alternatives:
+
+- **A file per branch.** Loses global ordering between files, costs descriptors, and a turn
+  stops being readable with one `cat`.
+- **A nested JSON document per turn.** Reads nicely, but the tree must be held in memory until
+  the turn ends. That forfeits append-only, which forfeits streaming, which forfeits the
+  Phase 3 dashboard — it consumes events one at a time. A crashed turn would also leave
+  nothing on disk.
+- **OpenTelemetry now.** Still deferred.
+
+Worth stating plainly: `span` + `parent` *is* OpenTelemetry's data model in miniature. That is
+not a coincidence, it is the right model for the problem. The payoff is that a later OTel
+export becomes a field mapping rather than a redesign, and two hand-written fields today are
+far cheaper than the SDK.
+
+The gain is not only legibility — it makes fan-out **assertable against a stub model**, with no
+credentials: exactly N `generate` spans sharing one parent, each with a distinct `branch`
+(structural proof of diversity, rather than reading the prose), exactly one `select_best`
+running only after all branches, and zero spans after a `cap` event.
+
+Two known costs, to be measured rather than assumed: a fan-out turn writes roughly 6x the
+lines, and `event()` currently does a synchronous open/write/close inside the event loop —
+invisible when the loop is sequential, a per-write stall exactly when branches are meant to
+overlap.
+
+### Budget: one mutable counter, passed down (informed by pydantic-ai)
+
+Pydantic-ai's agent-delegation guide independently arrives at the same shape as the routing
+decision above — the delegate is invoked *from inside a tool* — and it answers the accounting
+question in one argument:
+
+```python
+@joke_selection_agent.tool
+async def joke_factory(ctx: RunContext, count: int) -> list[str]:
+    r = await joke_generation_agent.run(f'Please generate {count} jokes.', usage=ctx.usage)
+    return r.output
+```
+
+`usage=ctx.usage` shares one accumulator **by reference**; parent and delegate add to the same
+object, and `UsageLimits` (`cost_limit`, `request_limit`, `total_tokens_limit`,
+`tool_calls_limit`) applies to the whole run rather than per agent. Notably the counter lives
+neither in graph state nor in the tool's arguments.
+
+Three candidates were considered for miku:
+
+| | Why not / why |
+|---|---|
+| Cap as a tool argument | Rejected outright: it makes the model declare its own limit. It also adds a field to a schema the routing spike showed to be delicately balanced — the model would omit it or pass 999. |
+| Subgraph owns its own cap | Rejected: local caps do not compose. Parent `max_iterations=8` and fan-out `5+1` both report "within limits" while the turn spends 48 calls. Two counters, one blind spot. |
+| A mutable counter in `Deps` | Correct in substance — one counter, shared by reference, which is what `ctx.usage` is. |
+
+The third needs one correction, and the repo already contains the pattern for it. `Deps` is
+built once per **session**, not per turn. On the CLI that is invisible; the Phase 3 web server
+runs concurrent turns over one `Deps`, where one turn's fan-out would eat another's budget —
+a relative of the bug that forced `iterations` to reset in `assemble`.
+
+`Tracer` already solved this exact lifecycle: it lives in `Deps`, is per-turn, and gets there
+through `for_turn(turn_id)`. **Budget should follow the tracer's lifecycle exactly** — same
+clone-per-turn shape, same route into the subgraph. Concurrent turns stay isolated by
+construction rather than by the CLI happening to run one at a time, no manual reset is needed,
+and there is one wiring problem to solve instead of two. One pattern, two uses.
+
+`iterations` stays in graph state. It is a property of the parent graph, read only by the
+parent graph, and it is already right; sharing a name with "limit" is not a reason to share a
+mechanism.
+
+Phase 2 counts **one** dimension: LLM requests per turn. `max_iterations` already bounds depth;
+what is missing is breadth (5 branches) multiplied by depth. Tokens and cost are the
+economically truer dimensions but require reading GreenNode's usage metadata, which is
+unverified — do not make Phase 2 depend on it.
+
+One further note from the same guide: *"Agent delegation doesn't need to use the same model for
+each agent."* Branches could run on `fast` while `select_best` runs on `judge` — cheaper, and
+the first real use for the four-role system built in Phase 1 but never exercised. It also
+reopens model-diversity as a variant of the diversity question rather than a dead end.
+
 ## Phase 1 scope (agreed)
 
 CLI only. No UI.
@@ -277,7 +453,8 @@ start rather than discovering while writing the first judge eval.
 | Phase | Content |
 |---|---|
 | 1 | CLI · hand-built StateGraph · provider registry · scheduling tools · SqliteSaver + Store (`remember`) · JSONL tracing · deterministic evals |
-| 2 | Best-of-N fan-out (`Send` + reducer) · budget & fan-out caps · node cache · retrieval gate + consolidation |
+| 2 | Best-of-N fan-out (`propose_slots` tool wrapping a `Send` subgraph) · per-turn budget · node cache · span/parent tracing |
+| 2.5 | Retrieval gate · fact consolidation · embeddings (`bge-m3`) |
 | 3 | Judge evals (`LLMJudge`) · **UI, two surfaces** (see below) |
 | later | OTel spans · other gateways · guardrails · semantic search over memory |
 
@@ -302,5 +479,9 @@ logic from waku transfers essentially unchanged, since it only cares about the e
   gemma/qwen agent? Needs a sanity check that the judge is actually stronger than the agent
   on the dimension being judged.
 - Does GreenNode support prompt caching? Unprobed.
-- Nothing has been written to `openspec/config.yaml` yet — once the stack settles, `context:`
-  is where the provider/framework conventions should be recorded (per CLAUDE.md).
+- Where the fan-out subgraph gets its tracer and budget. `Deps` reaches the parent graph's
+  nodes; the subgraph sits inside a tool, so either the tool closure receives them at build
+  time or `make_tools_node` passes its own span down — the latter is cleaner but touches the
+  tool signature.
+- How the angles are produced: a fixed list in code (deterministic, assertable) as the
+  default, with the model free to override them as a tool argument. Not yet settled.

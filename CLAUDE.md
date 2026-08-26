@@ -5,17 +5,16 @@ repository.
 
 ## Project state
 
-miku-agent is a local-first personal assistant agent. **Phase 1 is implemented**: a CLI
-conversation on a hand-built LangGraph `StateGraph`, with scheduling tools, two-tier memory,
-JSONL tracing, and a deterministic eval suite. The design constraint is legibility — explicit,
-readable code over framework indirection.
+miku-agent is a local-first personal assistant agent. **Phases 1 and 2 are implemented**: a
+CLI conversation on a hand-built LangGraph `StateGraph`, with scheduling tools, two-tier
+memory, JSONL tracing, a deterministic eval suite, and best-of-N fan-out behind a tool. The
+design constraint is legibility — explicit, readable code over framework indirection.
 
-Planning lives in OpenSpec. The Phase 1 change is
-`openspec/changes/miku-phase-1-cli-agent/`, and the architecture reasoning behind every
-decision (including the live provider spike results) is in
-`openspec/explorations/2026-08-25-miku-agent-architecture.md`. Read the exploration before
-proposing structural changes — most of the obvious alternatives were already considered and
-rejected there for stated reasons.
+Planning lives in OpenSpec. Completed changes are under `openspec/changes/archive/`, and the
+architecture reasoning behind every decision — including the live spike and measurement
+results — is in `openspec/explorations/2026-08-25-miku-agent-architecture.md`. Read the
+exploration before proposing structural changes: most of the obvious alternatives were already
+considered and rejected there for stated reasons.
 
 ## Architecture map (box -> file)
 
@@ -29,11 +28,20 @@ rejected there for stated reasons.
 - `miku/runtime/session.py` — one session: store + checkpointer + tools + model + tracer +
   compiled graph. Nothing is a module-level global; the eval suite runs many sessions per
   process.
-- `miku/graph/build.py` — the loop, wired by hand. `miku/graph/nodes.py` — the three nodes.
+- `miku/graph/build.py` — the loop, wired by hand. `miku/graph/nodes.py` — the three nodes,
+  plus `Deps` (session-lived) and `TurnContext` (turn-lived, delivered as `Runtime.context`).
+- `miku/graph/fanout.py` — the best-of-N subgraph: `plan_angles` -> `Send` x N -> `generate`
+  -> `select_best` -> `format`. Reached only through the `propose_slots` tool, so the main
+  graph is still three nodes.
+- `miku/runtime/budget.py` — one request allowance per turn, shared by reference with any
+  delegated subgraph.
 - `miku/memory/checkpointer.py` — thread state. `miku/memory/store.py` — cross-thread facts.
-- `miku/tools/` — `create_event` / `list_events` / `remember`, plus `registry.py` and the
-  injectable `clock.py`.
-- `miku/ops/tracing.py` — JSONL sink with redaction inside the sink.
+- `miku/tools/` — `create_event` / `list_events` / `remember` / `propose_slots`, plus
+  `registry.py` and the injectable `clock.py`. `proposals.py` is the delegating tool; it needs
+  the whole session, so `open_session` appends it after `Deps` exists.
+- `miku/ops/tracing.py` — JSONL sink with redaction inside the sink, `span`/`parent` parentage,
+  and a `listener` seam the gateway watches. `miku/ops/traceview.py` — reading a trace back as
+  a tree.
 - `miku/SOUL.md` — the persona: name and tone only.
 - `evals/deterministic/` — tests. `evals/task.py` is the single task function cases drive;
   `evals/evaluators.py` holds the evaluators; `evals/helpers.py` has the stub model.
@@ -49,6 +57,7 @@ uv run miku                # talk to Miku (new thread)
 uv run miku --thread work  # resume a named conversation
 uv run pytest              # the whole suite
 uv run pytest -k live      # only the cases that call the real provider
+uv run pytest evals/deterministic/test_fanout.py   # fan-out shape, no credentials
 uv run ruff check .        # lint (must be clean)
 ```
 
@@ -68,6 +77,19 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
   phrase things differently every run; a stored row does not.
 - **Keep the two memory tiers apart.** The checkpointer is not for facts; the store is not for
   message history.
+- **A tool that overlaps another tool's scope must say when *not* to use it.** Measured, not
+  stylistic: adding that one sentence to a description is what fixed the only genuine misroute
+  in the routing spike. Tool boundaries live in prose, never in routing code — no classifier
+  node decides which tool to use.
+- **Session-lived things go in `Deps`; turn-lived things go in `TurnContext`.** A session serves
+  many turns and will serve them concurrently. A budget or tracer in `Deps` is a bug waiting
+  for the web gateway.
+- **Per-turn context reaches a tool through the invocation config, never as a model argument.**
+  A model must not be able to declare its own limit, and the field must not appear in a schema
+  the model reads.
+- **Never write back to a field with a reducer.** `candidates` uses `operator.add`, so writing
+  a reordered copy appends rather than replaces. A live run found this the hard way; the ranked
+  order lives in its own field.
 - **Errors degrade, they do not crash.** Tool failures become tool results the model can see.
   Trace-write failures warn. Only configuration errors fail loudly, at startup.
 - **CLI output stays ASCII.** Windows consoles mangle em dashes and bullets.
@@ -76,7 +98,14 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 ## Known limits (deliberate, not oversights)
 
 - No retrieval gate and no consolidation: every fact rides along in every turn. Fine at tens,
-  wrong at thousands. First Phase 2 item.
+  wrong at thousands. This is Phase 2.5, the next change.
 - No prompt caching — unverified on GreenNode, so full context is re-sent each turn.
+- No node cache. It was planned for Phase 2 and then dropped on inspection: branch inputs are
+  deliberately never identical, so there is nothing for it to hit.
+- The budget counts requests, not tokens or cost. GreenNode's usage metadata is unprobed.
+- Distinct angles can converge on the same slot, so five branches do not guarantee five
+  options. Arguably a feature; untuned either way.
 - `main` defaults to `google/gemma-4-31b-it`. Measured, not assumed: `openai/gpt-4o-mini`
-  fails the weekday-resolution cases (it books "Saturday" as a Thursday).
+  fails the weekday-resolution cases (it books "Saturday" as a Thursday). `gemma` resolves
+  fan-out windows correctly too ("next week" -> the right Monday).
+- A fan-out turn costs 8 requests and ~13 trace lines, against 2 and ~5 for a plain turn.

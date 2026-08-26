@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage
@@ -66,3 +67,44 @@ def wants(name: str, args: dict, call_id: str = "call-1") -> AIMessage:
 
 def says(text: str) -> AIMessage:
     return AIMessage(content=text)
+
+
+@dataclass
+class PromptModel:
+    """A stub that answers according to what it was asked, not to call order.
+
+    Fan-out branches run concurrently, so a script indexed by call number would
+    make every assertion depend on which branch happened to finish first. This
+    one dispatches on the prompt text, which is stable no matter the ordering.
+    """
+
+    respond: Callable[[str], AIMessage]
+    calls: list[str] = field(default_factory=list)
+    bound_tools: list = field(default_factory=list)
+
+    def bind_tools(self, tools):
+        self.bound_tools = list(tools)
+        return self
+
+    async def ainvoke(self, messages, **_kwargs):
+        text = "\n".join(str(getattr(message, "content", "")) for message in messages)
+        self.calls.append(text)
+        fresh = self.respond(text).model_copy(deep=True)
+        # Same reason as StubModel: a shared id makes add_messages replace
+        # instead of append, silently changing the graph's shape.
+        fresh.id = f"prompt-stub-{len(self.calls)}"
+        for position, call in enumerate(fresh.tool_calls or []):
+            call["id"] = f"{call['id']}-{len(self.calls)}-{position}"
+        return fresh
+
+    @property
+    def invocations(self) -> int:
+        return len(self.calls)
+
+    def prompts_containing(self, needle: str) -> list[str]:
+        return [text for text in self.calls if needle in text]
+
+
+def slot_line(day: str, start_time: str, why: str = "fits the angle") -> AIMessage:
+    """A branch reply in the one-line shape the fan-out parser accepts."""
+    return AIMessage(content=f"{day} | {start_time} | {why}")

@@ -69,8 +69,10 @@ def build_scheduling_tools(settings: Settings) -> list[BaseTool]:
             coroutine=create_event,
             name="create_event",
             description=(
-                "Add one event to the calendar. Requires an absolute ISO date and a "
-                "24-hour HH:MM start time. Ask the user rather than guessing a time."
+                "Book one event on the calendar at a time the user has already "
+                "chosen. Requires an absolute ISO date and a 24-hour HH:MM start "
+                "time. Do NOT use this when the user has not said when they want "
+                "it: use propose_slots to find a time first."
             ),
         ),
         StructuredTool.from_function(

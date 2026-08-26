@@ -102,3 +102,92 @@ def _fake_session(*_args, **_kwargs):
         yield _FakeSession()
 
     return cm()
+
+
+# --- fan-out progress ------------------------------------------------------
+# A fan-out is six model calls inside a tool. Without these lines the terminal
+# goes quiet for all of them.
+
+
+def test_a_branch_result_names_its_branch(capsys):
+    print_tool_activity(
+        "node",
+        {
+            "node": "generate",
+            "branch": 2,
+            "ok": True,
+            "angle": "quietest day",
+            "day": "2026-08-27",
+            "start_time": "10:00",
+        },
+    )
+    out = capsys.readouterr().out
+    assert "[2]" in out
+    assert "quietest day" in out
+    assert "2026-08-27" in out
+
+
+def test_a_failed_branch_says_so_without_pretending(capsys):
+    print_tool_activity("node", {"node": "generate", "branch": 1, "ok": False})
+    assert "no usable slot" in capsys.readouterr().out
+
+
+def test_the_width_of_a_fanout_is_announced(capsys):
+    print_tool_activity("node", {"node": "plan_angles", "branches": 5})
+    assert "5 options" in capsys.readouterr().out
+
+
+def test_a_clamp_is_visible_rather_than_silent(capsys):
+    print_tool_activity(
+        "clamp", {"node": "plan_angles", "asked": 9, "using": 5, "reason": "angles"}
+    )
+    out = capsys.readouterr().out
+    assert "5 of 9" in out
+    assert "angles" in out
+
+
+def test_a_selection_reports_what_it_chose_from(capsys):
+    print_tool_activity(
+        "node", {"node": "select_best", "candidates": 4, "chosen": 2, "judged": True}
+    )
+    out = capsys.readouterr().out
+    assert "option 2 of 4" in out
+    assert "judged" in out
+
+
+def test_a_single_candidate_is_not_reported_as_judged(capsys):
+    print_tool_activity(
+        "node", {"node": "select_best", "candidates": 1, "chosen": 0, "judged": False}
+    )
+    assert "only option" in capsys.readouterr().out
+
+
+def test_a_budget_stop_is_visible(capsys):
+    print_tool_activity("budget", {"node": "agent", "spent": 24, "limit": 24})
+    assert "budget" in capsys.readouterr().out
+
+
+def test_ordinary_node_events_stay_quiet(capsys):
+    """The terminal reports work, not every state transition."""
+    for node in ("assemble", "agent", "tools", "format"):
+        print_tool_activity("node", {"node": node})
+    assert capsys.readouterr().out == ""
+
+
+def test_every_progress_line_is_ascii(capsys):
+    """Windows consoles mangle anything else."""
+    print_tool_activity("tool_call", {"tool": "propose_slots", "args": {"task": "review"}})
+    print_tool_activity("node", {"node": "plan_angles", "branches": 5})
+    print_tool_activity(
+        "node",
+        {"node": "generate", "branch": 0, "ok": True, "angle": "a", "day": "d", "start_time": "t"},
+    )
+    print_tool_activity(
+        "clamp", {"node": "plan_angles", "asked": 9, "using": 5, "reason": "budget"}
+    )
+    print_tool_activity("node", {"node": "select_best", "candidates": 2, "chosen": 0})
+    print_tool_activity("budget", {"node": "agent"})
+
+    out = capsys.readouterr().out
+    assert out.strip()
+    out.encode("ascii")  # raises if anything slipped in

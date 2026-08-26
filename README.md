@@ -8,6 +8,11 @@ across conversations, leaves a readable trace, and is covered by tests. The loop
 hand-built LangGraph `StateGraph`: three nodes and one cycle, written out rather than
 summoned from a prebuilt, because the loop is the part worth reading.
 
+**Phase 2 — best-of-N fan-out.** Ask *when* rather than *book this*, and Miku explores five
+candidate slots in parallel, each from a different angle, then judges them against what it
+knows about you. It is `Send`-based map-reduce in a subgraph behind a tool — so the model
+decides to fan out by choosing that tool, and the main loop is still three nodes.
+
 ## Quickstart
 
 ```bash
@@ -20,6 +25,23 @@ uv run miku --thread work    # resume a named conversation
 Try it: *"Remember that I dislike meetings before 9am."* Quit. Start again.
 *"Book a catch-up with Alex on Saturday."* The fact is still there — it lives in
 `.miku/state.db`, which is yours to open.
+
+Then ask something with no time in it — *"find me a good time for a 1-hour design review
+this week"* — and watch five branches come back out of order:
+
+```
+  > propose_slots(end_day='2026-08-30', start_day='2026-08-25', task='1-hou...)
+    ... exploring 5 options in parallel
+    [1] after lunch: 2026-08-25 13:30
+    [3] beside existing work: 2026-08-26 10:30
+    [0] early morning: 2026-08-25 09:00
+    [2] quietest day: 2026-08-25 09:00
+    [4] late in the window: 2026-08-30 14:00
+    ... picked option 1 of 5 (judged)
+miku> I recommend today, August 25th, at 09:00. Would you like me to book that?
+```
+
+It proposed; it did not book. And it did not offer you 08:00, because you told it not to.
 
 ## The map
 
@@ -38,11 +60,21 @@ Try it: *"Remember that I dislike meetings before 9am."* Quit. Start again.
   │        ▲               ▲                      │                │
   │        │               └──────────────────────┘                │
   │   SOUL.md + facts + history        (capped at MIKU_MAX_ITERATIONS)
-  └────────────────────────────────────────────────────────────────┘
-        │                                    │
+  └───────────────────────────────────────────────│────────────────┘
+        │                          propose_slots  │
+        │                                         ▼
+        │        ┌──────── graph/fanout.py ─────────────────────────┐
+        │        │  plan_angles ──Send x N──▶ generate (concurrent) │
+        │        │                                │                 │
+        │        │       format ◀── select_best ◀─┘  (LLM as judge) │
+        │        └──────────────────────────────────────────────────┘
         ▼                                    ▼
   state.db: threads + facts + events   .miku/traces/<date>.jsonl
 ```
+
+The fan-out is a subgraph reached through a tool, not a fourth node. That is deliberate:
+choosing a tool is already how a model decides things, so "should I fan out?" needs no new
+machinery — and a plain "book it Saturday at 8am" costs one request instead of eight.
 
 | Path | What lives there |
 |---|---|
@@ -51,11 +83,14 @@ Try it: *"Remember that I dislike meetings before 9am."* Quit. Start again.
 | `miku/runtime/providers.py` | the provider adapter — roles, capability flags, two builders |
 | `miku/runtime/session.py` | one session: store, checkpointer, tools, model, tracer, graph |
 | `miku/graph/build.py` | the loop, wired by hand — three nodes, one cycle |
-| `miku/graph/nodes.py` | assemble context · agent · tools |
+| `miku/graph/nodes.py` | assemble context · agent · tools, plus `Deps` and `TurnContext` |
+| `miku/graph/fanout.py` | the best-of-N subgraph — `Send`, a reducer, and a judge |
+| `miku/runtime/budget.py` | one request allowance per turn, shared with the fan-out |
 | `miku/memory/checkpointer.py` | thread state (short-term) |
 | `miku/memory/store.py` | facts across threads (long-term) |
-| `miku/tools/` | `create_event` · `list_events` · `remember`, plus the registry |
+| `miku/tools/` | `create_event` · `list_events` · `remember` · `propose_slots` |
 | `miku/ops/tracing.py` | JSONL sink, with redaction where it cannot be forgotten |
+| `miku/ops/traceview.py` | reading a trace back as a tree, for evals and eyeballs |
 | `miku/SOUL.md` | who Miku is — name and tone, nothing else |
 | `evals/deterministic/` | the tests. `evals/task.py` is the one function cases drive |
 
@@ -111,12 +146,19 @@ See `.env.example`. The only required value is the provider API key.
 |---|---|---|
 | `MIKU_PROVIDER` | `greennode` | which descriptor to use |
 | `MIKU_MODEL_MAIN` | descriptor default | override the agent's model |
-| `MIKU_MAX_ITERATIONS` | `8` | hard stop on agent laps per turn |
+| `MIKU_MAX_ITERATIONS` | `8` | hard stop on agent laps per turn (depth) |
+| `MIKU_FANOUT_BRANCHES` | `5` | candidates a fan-out explores (width) |
+| `MIKU_MAX_REQUESTS_PER_TURN` | `24` | model requests per turn, fan-out included |
 | `MIKU_STATE_DIR` | `.miku` | where `state.db` and `traces/` live |
 | `MIKU_USER_ID` | `local` | whose facts the store holds |
 
-## What Phase 1 is not
+## What is not here yet
 
-No fan-out subagents, no budget caps, no node cache (Phase 2). No web UI and no judge evals
-(Phase 3). No OTel, no guardrails, no semantic search over memory, no `.ics` export. Each
-one needs a working loop underneath it first, and now there is one.
+No retrieval gate and no fact consolidation — every remembered fact still rides along in
+every turn, which is fine at tens and wrong at thousands (Phase 2.5). No web UI and no
+judge evals (Phase 3). No OTel, no guardrails, no semantic search over memory, no `.ics`
+export.
+
+No node cache either, and that one is a decision rather than a delay: it was planned for
+Phase 2 and dropped on inspection, because branches are deliberately given different angles,
+so no two branch inputs are ever identical and there is nothing for a cache to hit.

@@ -20,7 +20,13 @@ class UnknownToolError(KeyError):
 
 
 def build_tools(settings: Settings, store: AsyncSqliteStore) -> list[BaseTool]:
-    """Every tool this session exposes to the model."""
+    """The tools that need nothing but this session's storage.
+
+    A tool that delegates to a subgraph needs the whole session -- models,
+    clock, store -- so it cannot be built before `Deps` exists. `open_session`
+    appends those to this list once it can; see runtime/session.py. Keeping that
+    step out of here is what stops this module importing the graph it feeds.
+    """
     return [*build_scheduling_tools(settings), *build_memory_tools(settings, store)]
 
 

@@ -73,6 +73,24 @@ def events_on_sync(db_path: Path, day: str) -> list[Event]:
         conn.close()
 
 
+def events_between_sync(db_path: Path, start_day: str, end_day: str) -> list[Event]:
+    """Every event in an inclusive ISO date range, earliest first.
+
+    ISO dates sort lexicographically, which is why a BETWEEN on text works here
+    and why the day column is stored absolute rather than as a weekday name.
+    """
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT title, day, start_time FROM events "
+            "WHERE day BETWEEN ? AND ? ORDER BY day, start_time, id",
+            (start_day, end_day),
+        ).fetchall()
+        return [Event(title=r[0], day=r[1], start_time=r[2]) for r in rows]
+    finally:
+        conn.close()
+
+
 async def insert_event(db_path: Path, event: Event) -> int:
     """Async wrapper — sqlite3 is blocking, and the graph is async."""
     return await asyncio.to_thread(insert_event_sync, db_path, event)
@@ -80,3 +98,7 @@ async def insert_event(db_path: Path, event: Event) -> int:
 
 async def events_on(db_path: Path, day: str) -> list[Event]:
     return await asyncio.to_thread(events_on_sync, db_path, day)
+
+
+async def events_between(db_path: Path, start_day: str, end_day: str) -> list[Event]:
+    return await asyncio.to_thread(events_between_sync, db_path, start_day, end_day)

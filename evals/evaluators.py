@@ -94,3 +94,53 @@ class StoppedAtCap(Evaluator[TurnInputs, TurnOutput]):
 
     def evaluate(self, ctx: EvaluatorContext[TurnInputs, TurnOutput]) -> bool:
         return ctx.output.iterations == self.cap
+
+
+@dataclass
+class DidNotCallTool(Evaluator[TurnInputs, TurnOutput]):
+    """The named tool was NOT called.
+
+    The point of a negative: two scheduling tools overlap, and the boundary
+    between them lives in their descriptions. Asserting only that the right one
+    ran would pass a turn that also called the wrong one.
+    """
+
+    tool: str
+
+    def evaluate(self, ctx: EvaluatorContext[TurnInputs, TurnOutput]) -> bool:
+        return not ctx.output.called(self.tool)
+
+
+@dataclass
+class FannedOut(Evaluator[TurnInputs, TurnOutput]):
+    """A fan-out of the expected shape happened.
+
+    Reads the trace rather than the reply: at least `min_branches` branches, each
+    with a distinct angle, all caused by the same step, and exactly one
+    selection. That is the structure the feature is; the wording is not.
+    """
+
+    min_branches: int = 2
+
+    def evaluate(self, ctx: EvaluatorContext[TurnInputs, TurnOutput]) -> bool:
+        branches = [r for r in ctx.output.nodes_named("generate") if r.get("branch") is not None]
+        if len(branches) < self.min_branches:
+            return False
+        if len({r["branch"] for r in branches}) != len(branches):
+            return False
+        if len({r.get("parent") for r in branches}) != 1:
+            return False
+        return len(ctx.output.nodes_named("select_best")) == 1
+
+
+@dataclass
+class SpentAtMost(Evaluator[TurnInputs, TurnOutput]):
+    """The turn stayed inside a request budget.
+
+    A fan-out multiplies cost, so cost is worth asserting rather than assuming.
+    """
+
+    requests: int
+
+    def evaluate(self, ctx: EvaluatorContext[TurnInputs, TurnOutput]) -> bool:
+        return 0 < ctx.output.requests <= self.requests

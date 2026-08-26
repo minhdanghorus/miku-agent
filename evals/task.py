@@ -13,6 +13,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from miku.ops.traceview import read_records
 from miku.runtime.config import load_settings
 from miku.runtime.session import open_session
 from miku.tools.calendar_store import events_on_sync
@@ -40,6 +41,14 @@ class TurnOutput:
     tool_calls: list[dict] = field(default_factory=list)
     events: list[dict] = field(default_factory=list)
     iterations: int = 0
+    # This turn's trace records. A fan-out happens inside a tool, so its shape
+    # -- how many branches, under what parent -- is only visible here.
+    records: list[dict] = field(default_factory=list)
+    # Model requests the turn spent, the fan-out's included.
+    requests: int = 0
+
+    def nodes_named(self, node: str) -> list[dict]:
+        return [record for record in self.records if record.get("node") == node]
 
     def called(self, name: str) -> bool:
         return any(call["name"] == name for call in self.tool_calls)
@@ -65,6 +74,7 @@ async def run_turn(inputs: TurnInputs) -> TurnOutput:
                 )
 
             result = await session.run_turn(inputs.message, thread_id=inputs.thread_id)
+            records = read_records(session.deps.tracer.path, result.turn_id)
 
         # Read the stored rows before the temporary directory goes away.
         days = {
@@ -86,4 +96,6 @@ async def run_turn(inputs: TurnInputs) -> TurnOutput:
             tool_calls=result.tool_calls,
             events=events,
             iterations=result.iterations,
+            records=records,
+            requests=result.requests,
         )

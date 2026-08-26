@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     # The loop's hard stop. Reaching it ends the turn with a reply saying so.
     max_iterations: int = Field(default=8, ge=1)
 
+    # How wide a fan-out goes. Clamped down to the number of distinct angles
+    # available, so raising this alone does not buy more diversity.
+    fanout_branches: int = Field(default=5, ge=1)
+
+    # Every model request in a turn counts against this, the main loop's and any
+    # delegated subgraph's alike. max_iterations bounds depth; this bounds
+    # depth x breadth, which is the number that actually decides the bill.
+    max_requests_per_turn: int = Field(default=24, ge=1)
+
     # Request limits, applied to every model the adapter builds.
     request_timeout: float = Field(default=90.0, gt=0)
     max_retries: int = Field(default=2, ge=0)

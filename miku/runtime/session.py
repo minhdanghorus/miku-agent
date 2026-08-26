@@ -14,13 +14,15 @@ from dataclasses import dataclass
 from langchain_core.messages import AIMessage, HumanMessage
 
 from miku.graph.build import build_graph
-from miku.graph.nodes import Deps
+from miku.graph.nodes import Deps, TurnContext
 from miku.memory.checkpointer import open_checkpointer
 from miku.memory.store import open_store
 from miku.ops.tracing import Tracer, new_turn_id
+from miku.runtime.budget import Budget
 from miku.runtime.config import Settings, load_settings
 from miku.runtime.providers import get_provider
 from miku.tools.clock import Clock
+from miku.tools.proposals import build_proposal_tools
 from miku.tools.registry import build_tools
 
 
@@ -33,6 +35,9 @@ class TurnResult:
     tool_calls: list[dict]
     iterations: int
     turn_id: str
+    # Model requests this turn actually spent, the fan-out's included. Reported
+    # so an eval can assert cost without reading the trace back.
+    requests: int = 0
 
     def called(self, name: str) -> bool:
         return any(call["name"] == name for call in self.tool_calls)
@@ -47,10 +52,12 @@ class TurnResult:
 class Session:
     """Runs turns against one compiled graph."""
 
-    def __init__(self, settings: Settings, graph, deps: Deps):
+    def __init__(self, settings: Settings, graph, deps: Deps, budget: Budget):
         self.settings = settings
         self.graph = graph
         self.deps = deps
+        # A template, not a counter: every turn clones its own allowance off it.
+        self.budget = budget
 
     async def run_turn(
         self,
@@ -60,12 +67,23 @@ class Session:
     ) -> TurnResult:
         """One user message in, one reply out.
 
-        `on_event` is how a gateway watches progress — it receives the same
-        `{kind, ...}` shape the trace records, so a terminal and a future browser
-        UI can be fed from the same stream.
+        `on_event` is how a gateway watches progress. It is called with the
+        `{kind, ...}` trace records themselves, plus a `tool_call` event carrying
+        the arguments before a tool runs, so a terminal and a future browser UI
+        can be fed from one stream. Nodes inside a delegated subgraph reach it
+        only this way.
         """
         turn_id = new_turn_id()
-        self.deps.tracer.turn_id = turn_id
+        # One tracer and one budget per turn, cloned rather than reset in place.
+        # Resetting shared objects is how two concurrent turns come to share a
+        # counter, which the web gateway would expose immediately.
+        tracer = self.deps.tracer.for_turn(turn_id)
+        if on_event is not None:
+            # A delegated subgraph runs inside a tool, so its nodes never appear
+            # in this graph's update stream. The trace is the only place they
+            # surface, which makes it the right feed for a watching gateway.
+            tracer.listener = lambda record: on_event(record["kind"], record)
+        turn = TurnContext(tracer=tracer, budget=self.budget.for_turn())
         config = {"configurable": {"thread_id": thread_id}}
         inputs = {"messages": [HumanMessage(content=message)], "turn_id": turn_id}
 
@@ -73,8 +91,10 @@ class Session:
         reply = ""
         iterations = 0
 
-        async for update in self.graph.astream(inputs, config=config, stream_mode="updates"):
-            for node, patch in update.items():
+        async for update in self.graph.astream(
+            inputs, config=config, context=turn, stream_mode="updates"
+        ):
+            for patch in update.values():
                 if not isinstance(patch, dict):
                     continue
                 iterations = patch.get("iterations", iterations)
@@ -87,11 +107,12 @@ class Session:
                     if isinstance(produced, AIMessage) and produced.content:
                         reply = str(produced.content)
 
-                if on_event:
-                    on_event("node", {"node": node})
-
         return TurnResult(
-            reply=reply, tool_calls=tool_calls, iterations=iterations, turn_id=turn_id
+            reply=reply,
+            tool_calls=tool_calls,
+            iterations=iterations,
+            turn_id=turn_id,
+            requests=turn.budget.spent,
         )
 
 
@@ -110,10 +131,16 @@ async def open_session(
     settings.ensure_dirs()
 
     async with open_store(settings) as store, open_checkpointer(settings) as checkpointer:
+        fast_model = judge_model = model
         if model is None:
             from miku.runtime.providers import chat_model
 
             model = chat_model(settings, "main")
+            # The fan-out's branches run on the cheap role and its selection on
+            # the judge role. Today's descriptor maps main and fast to the same
+            # model, so this buys nothing yet -- it puts the seam where it goes.
+            fast_model = chat_model(settings, "fast")
+            judge_model = chat_model(settings, "judge")
 
         provider = get_provider(settings)
         tracer = Tracer(
@@ -128,5 +155,18 @@ async def open_session(
             model=model,
             tracer=tracer,
             clock=clock or Clock.real(),
+            fast_model=fast_model,
+            judge_model=judge_model,
         )
-        yield Session(settings, build_graph(deps, checkpointer=checkpointer), deps)
+        # A delegating tool needs the session it runs inside -- its subgraph
+        # calls the same models and reads the same store -- so it cannot be
+        # built before Deps exists. Added here, before build_graph binds the
+        # list to the model.
+        deps.tools.extend(build_proposal_tools(deps))
+
+        yield Session(
+            settings,
+            build_graph(deps, checkpointer=checkpointer),
+            deps,
+            Budget(limit=settings.max_requests_per_turn),
+        )

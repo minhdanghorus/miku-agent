@@ -7,6 +7,12 @@ import json
 
 import pytest
 
+from miku.ops.traceview import (
+    branches_under,
+    build_tree,
+    parents_of,
+    read_records,
+)
 from miku.ops.tracing import REDACTED, Tracer, new_turn_id
 
 
@@ -123,3 +129,110 @@ def test_unserialisable_payloads_do_not_raise(tracer):
 
 def test_turn_ids_are_unique():
     assert new_turn_id() != new_turn_id()
+
+
+# --- parentage -------------------------------------------------------------
+# Line order records arrival. Structure comes from `parent`, and these are the
+# tests that hold that distinction in place.
+
+
+def test_every_event_carries_its_own_span(tracer):
+    first = tracer.event("node", node="assemble")
+    second = tracer.event("node", node="agent")
+
+    spans = [record["span"] for record in read_lines(tracer)]
+    assert spans == [first, second]
+    assert len(set(spans)) == 2
+
+
+def test_a_root_event_has_no_parent(tracer):
+    tracer.event("node", node="assemble")
+    assert read_lines(tracer)[0]["parent"] is None
+
+
+def test_a_linear_turn_reconstructs_as_one_chain(tracer):
+    root = tracer.event("node", node="assemble")
+    agent = tracer.event("node", node="agent", parent=root)
+    tools = tracer.event("node", node="tools", parent=agent)
+    tracer.event("node", node="agent", parent=tools)
+
+    roots = build_tree(read_lines(tracer))
+    assert len(roots) == 1
+    chain = [node.node for node in roots[0].walk()]
+    assert chain == ["assemble", "agent", "tools", "agent"]
+
+
+def test_a_child_tracer_hangs_events_under_its_parent(tracer):
+    parent = tracer.event("node", node="tools")
+    tracer.child(parent).event("node", node="plan_angles")
+
+    records = read_lines(tracer)
+    assert records[1]["parent"] == parent
+    assert records[1]["turn_id"] == records[0]["turn_id"]
+
+
+def test_concurrent_branches_share_one_parent_and_differ_by_branch(tracer):
+    parent = tracer.event("node", node="plan_angles")
+    for index in (0, 1, 2):
+        tracer.child(parent, branch=index).event("node", node="generate")
+
+    records = read_lines(tracer)
+    generated = branches_under(records, "generate")
+    assert len(generated) == 3
+    assert parents_of(records, "generate") == {parent}
+    assert sorted(record["branch"] for record in generated) == [0, 1, 2]
+
+
+def test_out_of_order_arrival_reconstructs_identically(tracer):
+    """Branches finish in whatever order they finish. The tree must not care."""
+    parent = tracer.event("node", node="plan_angles")
+    children = [tracer.child(parent, branch=i) for i in (0, 1, 2)]
+    for index in (2, 0, 1):  # deliberately not the order they were created in
+        children[index].event("node", node="generate")
+
+    roots = build_tree(read_lines(tracer))
+    assert len(roots) == 1
+    assert len(roots[0].children) == 3
+    assert {child.record["branch"] for child in roots[0].children} == {0, 1, 2}
+
+
+def test_a_branchless_tracer_writes_no_branch_field(tracer):
+    tracer.event("node", node="agent")
+    assert "branch" not in read_lines(tracer)[0]
+
+
+def test_an_orphaned_event_is_reported_as_a_root(tracer):
+    """A file read mid-write can reference a parent that is not there yet."""
+    tracer.event("node", node="generate", parent="never-written")
+    roots = build_tree(read_lines(tracer))
+    assert len(roots) == 1
+    assert roots[0].node == "generate"
+
+
+def test_a_truncated_line_does_not_break_the_reader(tracer):
+    tracer.event("node", node="assemble")
+    with tracer.path.open("a", encoding="utf-8") as handle:
+        handle.write('{"turn_id": "turn-a", "sp\n')  # a killed write
+
+    records = read_records(tracer.path)
+    assert len(records) == 1
+    assert records[0]["node"] == "assemble"
+
+
+def test_a_new_turn_does_not_inherit_parentage(tracer):
+    parent = tracer.event("node", node="tools")
+    fresh = tracer.child(parent).for_turn("turn-b")
+    fresh.event("node", node="assemble")
+
+    later = [r for r in read_lines(tracer) if r["turn_id"] == "turn-b"]
+    assert later[0]["parent"] is None
+
+
+def test_a_span_is_returned_even_when_the_write_fails(tmp_path):
+    blocked = tmp_path / "file-not-a-dir"
+    blocked.write_text("occupied", encoding="utf-8")
+    tracer = Tracer(traces_dir=blocked, turn_id="turn-a")
+    tracer.warn_stream = io.StringIO()
+
+    span = tracer.event("node", node="agent")
+    assert span  # parentage must survive a broken sink

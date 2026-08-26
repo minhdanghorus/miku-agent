@@ -16,7 +16,10 @@ from pydantic_evals import Case, Dataset
 from evals.evaluators import (
     CalledNoTools,
     CalledTool,
+    DidNotCallTool,
+    FannedOut,
     MentionsAny,
+    SpentAtMost,
     StoppedAtCap,
     StoredEvent,
     StoredNothing,
@@ -38,6 +41,9 @@ LIVE_CASES = [
         ),
         evaluators=[
             CalledTool(tool="create_event"),
+            # The negative matters as much as the positive: a stated time must
+            # not trigger a six-request search for one.
+            DidNotCallTool(tool="propose_slots"),
             StoredEvent(day=NEXT_SATURDAY, start_time="08:00", title_contains="tennis"),
         ],
     ),
@@ -64,6 +70,33 @@ LIVE_CASES = [
         inputs=TurnInputs(message="Hello, who are you?", today=TODAY),
         evaluators=[CalledNoTools()],
     ),
+    # --- routing between the two scheduling tools -------------------------
+    # The boundary lives in the tool descriptions, not in code. These cases are
+    # what makes an edit to that prose fail a test instead of quietly
+    # misrouting.
+    Case(
+        name="a_request_with_no_time_fans_out",
+        inputs=TurnInputs(
+            message="Find me a good time for a 1-hour design review this week.", today=TODAY
+        ),
+        evaluators=[
+            CalledTool(tool="propose_slots"),
+            DidNotCallTool(tool="create_event"),
+            FannedOut(min_branches=3),
+            # Proposing is not booking.
+            StoredNothing(),
+            SpentAtMost(requests=12),
+        ],
+    ),
+    Case(
+        name="a_vague_when_question_fans_out",
+        inputs=TurnInputs(message="When should I schedule the dentist next week?", today=TODAY),
+        evaluators=[
+            CalledTool(tool="propose_slots"),
+            DidNotCallTool(tool="create_event"),
+            StoredNothing(),
+        ],
+    ),
     Case(
         name="recalls_a_fact_across_threads",
         inputs=TurnInputs(
@@ -81,7 +114,7 @@ LIVE_CASES = [
 @pytest.mark.skipif(not has_credentials(), reason=SKIP_REASON)
 def test_live_suite():
     """The live half. Reports per case; fails the run if any case fails."""
-    dataset = Dataset(name="miku-phase-1", cases=LIVE_CASES)
+    dataset = Dataset(name="miku-phase-2", cases=LIVE_CASES)
     report = dataset.evaluate_sync(run_turn, max_concurrency=2)
     report.print(include_input=False, include_output=False)
 

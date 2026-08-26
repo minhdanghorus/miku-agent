@@ -38,3 +38,9 @@ class TurnState(TypedDict, total=False):
 
     # What "today" is for this turn — injectable so evals stay stable.
     today: str
+
+    # The span of the most recent trace event, which is what the next node hangs
+    # under. Parentage lives here rather than in the per-turn context because it
+    # changes from node to node; a per-run constant could not express a chain.
+    # It stays a plain string so the checkpointer can persist it.
+    span: str
