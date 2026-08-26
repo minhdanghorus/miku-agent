@@ -63,9 +63,17 @@ async def test_the_cockpit_page_and_its_assets_are_served(settings):
             sheet = await client.get("/style.css")
 
     assert page.status_code == 200
-    assert "miku" in page.text
     assert script.status_code == 200
     assert sheet.status_code == 200
+
+    # Structure, not wording. The first version of this asserted the page
+    # contained the string "miku", which broke the moment the persona's name was
+    # capitalised -- a test failing on a copy edit, in a repo whose own rule is
+    # that assertions read observable state and never prose. What actually makes
+    # the page work is that it pulls the two assets served above.
+    assert 'src="./app.js"' in page.text
+    assert 'href="./style.css"' in page.text
+    assert "<title>" in page.text
 
 
 def test_the_repository_declares_no_javascript_toolchain():
