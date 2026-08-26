@@ -6,7 +6,14 @@ import builtins
 
 import pytest
 
-from miku.gateway.cli import main, new_thread_id, parse_args, print_tool_activity
+from miku.gateway.cli import (
+    main,
+    new_thread_id,
+    parse_args,
+    print_consolidation_activity,
+    print_consolidation_report,
+    print_tool_activity,
+)
 from miku.runtime.providers import GREENNODE
 
 
@@ -191,3 +198,163 @@ def test_every_progress_line_is_ascii(capsys):
     out = capsys.readouterr().out
     assert out.strip()
     out.encode("ascii")  # raises if anything slipped in
+
+
+# --- the consolidate subcommand --------------------------------------------
+
+
+def test_a_bare_invocation_still_starts_a_conversation():
+    """Every existing way of launching miku must keep working."""
+    assert parse_args([]).command is None
+    assert parse_args(["--thread", "work"]).command is None
+    assert parse_args(["--thread", "work"]).thread_id == "work"
+
+
+def test_consolidate_defaults_to_writing_nothing():
+    args = parse_args(["consolidate"])
+    assert args.command == "consolidate"
+    assert args.apply is False
+
+
+def test_applying_takes_an_explicit_flag():
+    assert parse_args(["consolidate", "--apply"]).apply is True
+
+
+def test_consolidation_progress_is_printed(capsys):
+    print_consolidation_activity("consolidate", {"node": "read", "facts": 12})
+    assert "12 live facts" in capsys.readouterr().out
+
+
+def test_consolidation_ignores_events_from_a_turn(capsys):
+    print_consolidation_activity("node", {"node": "agent"})
+    assert capsys.readouterr().out == ""
+
+
+def _result(**overrides):
+    from miku.memory.consolidate import ConsolidationResult
+    from miku.memory.plan import Operation
+    from miku.memory.store import LiveFact
+
+    facts = [
+        LiveFact(key="a", fact="I prefer mornings", created_at="2026-01-01T09:00:00+00:00"),
+        LiveFact(key="b", fact="I prefer afternoons", created_at="2026-02-01T09:00:00+00:00"),
+    ]
+    base = dict(
+        run_id="run1",
+        dry_run=True,
+        live_before=2,
+        live_after=2,
+        facts=facts,
+        proposed=1,
+        applicable=[Operation(kind="supersede", stale=[1], winner=2)],
+    )
+    base.update(overrides)
+    return ConsolidationResult(**base)
+
+
+def test_a_dry_run_report_names_the_facts_not_the_numbers(capsys):
+    print_consolidation_report(_result())
+    out = capsys.readouterr().out
+    assert "I prefer mornings" in out
+    assert "I prefer afternoons" in out
+    assert "dry run - nothing written" in out
+
+
+def test_an_applied_report_says_what_changed(capsys):
+    from miku.memory.consolidate import Applied
+    from miku.memory.plan import Operation
+
+    operation = Operation(kind="supersede", stale=[1], winner=2)
+    print_consolidation_report(
+        _result(
+            dry_run=False,
+            live_after=1,
+            applied=[Applied(operation=operation, stale_keys=["a"], winner_key="b")],
+        )
+    )
+    out = capsys.readouterr().out
+    assert "applied 1" in out
+    assert "2 facts live before, 1 after" in out
+
+
+def test_an_empty_plan_is_reported_as_nothing_to_do(capsys):
+    print_consolidation_report(_result(applicable=[], proposed=0))
+    assert "nothing to consolidate" in capsys.readouterr().out
+
+
+def test_a_dropped_operation_shows_its_reason(capsys):
+    from miku.memory.plan import SUPERSEDE_BACKWARDS, Dropped, Operation
+
+    dropped = [
+        Dropped(
+            operation=Operation(kind="supersede", stale=[2], winner=1),
+            reason=SUPERSEDE_BACKWARDS,
+        )
+    ]
+    print_consolidation_report(_result(applicable=[], dropped=dropped))
+    out = capsys.readouterr().out
+    assert SUPERSEDE_BACKWARDS in out
+
+
+def test_a_provider_failure_is_reported_as_a_sentence(capsys):
+    print_consolidation_report(_result(applicable=[], error="RuntimeError: 502 upstream"))
+    out = capsys.readouterr().out
+    assert "502 upstream" in out
+    assert "Traceback" not in out
+
+
+def test_an_index_with_no_fact_behind_it_is_reported_not_crashed(capsys):
+    from miku.memory.plan import Operation
+
+    print_consolidation_report(_result(applicable=[Operation(kind="expire", stale=[99])]))
+    assert "no such fact" in capsys.readouterr().out
+
+
+def test_every_consolidation_line_is_ascii(capsys):
+    from miku.memory.consolidate import Applied
+    from miku.memory.plan import MERGE_NEEDS_TEXT, Dropped, Operation
+
+    merge = Operation(kind="merge", stale=[1, 2], fact="Mornings, and never before 9")
+    print_consolidation_report(
+        _result(
+            dry_run=False,
+            applicable=[merge],
+            applied=[Applied(operation=merge, stale_keys=["a", "b"], written_key="c")],
+            dropped=[Dropped(operation=merge, reason=MERGE_NEEDS_TEXT)],
+            skipped=[Operation(kind="expire", stale=[1])],
+        )
+    )
+    print_consolidation_activity("consolidate", {"node": "read", "facts": 3})
+    print_consolidation_activity("consolidate", {"node": "plan", "ok": True, "proposed": 2,
+                                                 "applicable": 1})
+    print_consolidation_activity("budget", {})
+
+    out = capsys.readouterr().out
+    assert out.isascii(), out
+
+
+def test_only_a_merge_reports_text_it_will_write(capsys):
+    """Measured on gemma: it fills `fact` on supersede, duplicate and expire too,
+    and the pass ignores it. Printing it would promise a rewrite that never
+    happens, in the one report someone reads before typing --apply."""
+    from miku.memory.plan import Operation
+
+    print_consolidation_report(
+        _result(
+            applicable=[
+                Operation(kind="supersede", stale=[1], winner=2, fact="a rewrite nobody asked for")
+            ]
+        )
+    )
+    out = capsys.readouterr().out
+    assert "a rewrite nobody asked for" not in out
+    assert "retire" in out
+
+
+def test_a_merge_still_reports_its_text(capsys):
+    from miku.memory.plan import Operation
+
+    print_consolidation_report(
+        _result(applicable=[Operation(kind="merge", stale=[1, 2], fact="the merged sentence")])
+    )
+    assert "the merged sentence" in capsys.readouterr().out

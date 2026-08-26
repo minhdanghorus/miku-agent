@@ -9,8 +9,9 @@ across restarts. Long-term facts are what the agent knows about the user, visibl
 thread. Conflating the two is the easiest way to make an agent's memory illegible, so the
 requirements below keep each out of the other's storage.
 
-Facts are written only when explicitly asked for. Nothing infers what is worth keeping, and
-nothing rewrites what was kept.
+Facts are written only when explicitly asked for; nothing infers what is worth keeping. What
+was kept is not rewritten in place either - an explicit consolidation pass resolves which
+facts are still true, but it never deletes a row or changes the text of one.
 
 ## Requirements
 
@@ -44,6 +45,10 @@ Facts SHALL be persisted in a SQLite-backed LangGraph `Store` under a namespace 
 user, so that they are visible from every thread. The checkpointer SHALL NOT be used for
 long-term facts, and the store SHALL NOT be used for message history.
 
+A stored fact SHALL carry its text and the time it was written. It MAY additionally carry a
+supersession marker naming the fact that replaced it, the time it was superseded, and — when
+it was produced by merging others — the keys it was derived from.
+
 #### Scenario: A fact learned in one thread is available in another
 
 - **WHEN** a fact is remembered during one thread and a different thread later runs a turn
@@ -53,6 +58,12 @@ long-term facts, and the store SHALL NOT be used for message history.
 
 - **WHEN** a fact is remembered, the process exits, and a new process starts
 - **THEN** the fact is still recalled into the assembled context
+
+#### Scenario: Supersession is stored beside the fact, not in the checkpointer
+
+- **WHEN** a fact is marked superseded
+- **THEN** the marker is stored on that fact's row in the store
+- **AND** no thread's checkpointed state is modified
 
 ### Requirement: Remembering is an explicit tool call
 
@@ -79,19 +90,43 @@ statements to persist.
   something where that preference applies
 - **THEN** the recalled fact is present in the assembled context for that turn
 
-### Requirement: No retrieval gate or consolidation in this phase
+### Requirement: Recall excludes superseded facts
 
-Recall SHALL read the stored facts for the active user directly, without a model-driven gate
-deciding whether to retrieve and without a consolidation pass rewriting or compacting stored
-facts. These behaviors are deferred so they can be tuned against real accumulated data.
+Recall SHALL return only live facts — those carrying no supersession marker. A fact marked as
+superseded SHALL NOT appear in the assembled context, and SHALL NOT be returned to any other
+caller of recall.
+
+A fact row written before supersession existed carries no marker and SHALL be treated as live,
+so no migration is required.
+
+#### Scenario: A superseded fact leaves the assembled context
+
+- **WHEN** a fact has been marked superseded, and a later turn assembles context
+- **THEN** that fact is absent from the assembled context
+- **AND** the fact that superseded it is present
+
+#### Scenario: Every recall path filters alike
+
+- **WHEN** facts are recalled during context assembly and during a proposal tool call
+- **THEN** neither result contains a superseded fact
+
+#### Scenario: Rows written before supersession existed are live
+
+- **WHEN** a fact row carries no supersession marker
+- **THEN** it is recalled
+
+### Requirement: No retrieval gate in this phase
+
+Recall SHALL read the live facts for the active user directly, without a model-driven gate
+deciding whether to retrieve, and without a similarity ranking selecting a subset. Retrieval
+selection is deferred so it can be measured against real accumulated data before being built.
 
 #### Scenario: Recall requires no extra model call
 
 - **WHEN** context is assembled for a turn
-- **THEN** facts are read from the store without an additional LLM request
+- **THEN** live facts are read from the store without an additional model request
 
-#### Scenario: Stored facts are not rewritten
+#### Scenario: Every live fact is recalled
 
-- **WHEN** many facts accumulate over many turns
-- **THEN** existing fact entries remain byte-identical to what was written
-- **AND** no fact is merged, summarized, or deleted automatically
+- **WHEN** context is assembled for a turn and the user has several live facts
+- **THEN** all of them appear in the assembled context, up to the configured limit

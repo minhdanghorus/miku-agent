@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     # depth x breadth, which is the number that actually decides the bill.
     max_requests_per_turn: int = Field(default=24, ge=1)
 
+    # The same idea for a consolidation run, which is not a turn and must not
+    # spend a turn's allowance. Small on purpose: the pass is one request today,
+    # and the headroom exists so that chunking a large fact set stays bounded
+    # rather than becoming an unbounded loop over memory.
+    max_requests_per_consolidation: int = Field(default=4, ge=1)
+
     # Request limits, applied to every model the adapter builds.
     request_timeout: float = Field(default=90.0, gt=0)
     max_retries: int = Field(default=2, ge=0)

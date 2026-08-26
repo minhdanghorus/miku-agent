@@ -30,6 +30,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Resume a named conversation. Defaults to a new one.",
     )
+    # Optional on purpose: a bare `miku` still opens a conversation, which is
+    # what every existing invocation does.
+    commands = parser.add_subparsers(dest="command")
+    tidy = commands.add_parser(
+        "consolidate",
+        help="Resolve contradictions and duplicates in long-term memory.",
+    )
+    tidy.add_argument(
+        "--apply",
+        action="store_true",
+        help="Actually write. Without it, the plan is printed and nothing changes.",
+    )
     return parser.parse_args(argv)
 
 
@@ -72,6 +84,90 @@ def print_tool_activity(kind: str, payload: dict) -> None:
         print(f"    ... picked option {payload.get('chosen', 0)} of {of} ({how})")
 
 
+def print_consolidation_activity(kind: str, payload: dict) -> None:
+    """Progress for a consolidation run, fed from the same trace listener.
+
+    A pass is one model call over a possibly long list, so without this the
+    terminal would sit silent and then print a verdict.
+    """
+    if kind == "budget":
+        print("  ... request budget spent")
+        return
+    if kind != "consolidate":
+        return
+
+    node = payload.get("node", "")
+    if node == "read":
+        print(f"  ... {payload.get('facts', 0)} live facts")
+    elif node == "plan" and not payload.get("ok", True):
+        print(f"  ... could not plan: {payload.get('error', 'unknown error')}")
+    elif node == "plan":
+        print(f"  ... proposed {payload.get('proposed', 0)}, "
+              f"{payload.get('applicable', 0)} usable")
+
+
+def _quote(text: str, limit: int = 58) -> str:
+    """One fact on one line, ASCII, never wide enough to wrap a console."""
+    flat = " ".join(text.split())
+    if len(flat) > limit:
+        flat = flat[: limit - 3] + "..."
+    return f'"{flat}"'
+
+
+def _fact_at(result, index: int) -> str:
+    """Render a 1-based plan index as its fact, or as the number if it is bogus."""
+    if 1 <= index <= len(result.facts):
+        return _quote(result.facts[index - 1].fact)
+    return f"#{index} (no such fact)"
+
+
+def print_consolidation_report(result) -> None:
+    """The whole outcome of a run, in ASCII. Windows consoles mangle the rest."""
+    for operation in result.applicable:
+        print(f"  [{operation.kind}]")
+        for index in operation.stale:
+            print(f"      retire {_fact_at(result, index)}")
+        if operation.winner is not None:
+            print(f"      keep   {_fact_at(result, operation.winner)}")
+        # Only a merge writes text. Models routinely fill `fact` on the other
+        # three kinds anyway -- measured on gemma, 3 of 3 operations -- and the
+        # pass ignores it. Printing it would promise a rewrite that never
+        # happens, and this report is what someone reads before typing --apply.
+        if operation.fact and operation.kind == "merge":
+            print(f"      write  {_quote(operation.fact)}")
+
+    for drop in result.dropped:
+        print(f"  [dropped: {drop.reason}] {drop.operation.kind}")
+
+    for operation in result.skipped:
+        print(f"  [skipped] {operation.kind} - facts moved during the run")
+
+    if result.error:
+        print(f"  could not consolidate: {result.error}")
+    elif result.budget_exhausted:
+        print("  request budget spent before the pass could run")
+    elif not result.applicable:
+        print("  nothing to consolidate")
+    elif result.dry_run:
+        print(f"\n  dry run - nothing written. {result.live_before} facts still live.")
+        print("  run 'miku consolidate --apply' to apply this.")
+    else:
+        print(f"\n  applied {len(result.applied)}. "
+              f"{result.live_before} facts live before, {result.live_after} after.")
+
+
+async def consolidate_memory(apply: bool) -> int:
+    """Open the pass, run it once, print what it did. No logic beyond that."""
+    from miku.memory.consolidate import open_consolidation
+
+    settings = load_settings()
+    async with open_consolidation(settings, on_event=print_consolidation_activity) as run:
+        print("miku - tidying long-term memory")
+        result = await run(apply=apply)
+        print_consolidation_report(result)
+        return 0
+
+
 def _short(args: dict, limit: int = 60) -> str:
     text = ", ".join(f"{key}={value!r}" for key, value in args.items())
     return text if len(text) <= limit else text[: limit - 3] + "..."
@@ -105,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
     thread_id = args.thread_id or new_thread_id()
 
     try:
+        if args.command == "consolidate":
+            return asyncio.run(consolidate_memory(apply=args.apply))
         return asyncio.run(chat(thread_id))
     except ProviderError as error:
         # Configuration is the one failure we want loud and early — but as a

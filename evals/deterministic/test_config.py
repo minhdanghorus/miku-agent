@@ -41,3 +41,26 @@ def test_the_budget_bounds_more_than_the_iteration_cap():
     the budget bounds depth x breadth, so the budget must be the larger."""
     settings = load_settings()
     assert settings.max_requests_per_turn > settings.max_iterations
+
+
+def test_the_consolidation_budget_has_a_default():
+    assert load_settings().max_requests_per_consolidation == 4
+
+
+def test_the_consolidation_budget_is_overridable(monkeypatch):
+    monkeypatch.setenv("MIKU_MAX_REQUESTS_PER_CONSOLIDATION", "2")
+    assert load_settings().max_requests_per_consolidation == 2
+
+
+def test_the_consolidation_budget_rejects_zero():
+    with pytest.raises(ValidationError):
+        load_settings(max_requests_per_consolidation=0)
+
+
+def test_a_consolidation_run_does_not_borrow_the_turn_allowance():
+    """Two separate knobs on purpose: a run is not a turn, and a pass over all
+    of memory must not be able to spend what a conversation was allotted."""
+    settings = load_settings()
+    moved = load_settings(max_requests_per_consolidation=11)
+    assert moved.max_requests_per_consolidation == 11
+    assert moved.max_requests_per_turn == settings.max_requests_per_turn

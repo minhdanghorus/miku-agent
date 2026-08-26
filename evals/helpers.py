@@ -108,3 +108,45 @@ class PromptModel:
 def slot_line(day: str, start_time: str, why: str = "fits the angle") -> AIMessage:
     """A branch reply in the one-line shape the fan-out parser accepts."""
     return AIMessage(content=f"{day} | {start_time} | {why}")
+
+
+@dataclass
+class PlanModel:
+    """A stand-in for the consolidation model: returns plans, not messages.
+
+    The pass asks for structured output, so this answers `with_structured_output`
+    by handing back itself and then returning a `Plan` object directly. That
+    keeps the whole consolidation suite free of credentials while still driving
+    the real validation, the real writes, and the real trace.
+
+    Plans are returned in order, repeating the last forever — which is what makes
+    the idempotence case work: the second run gets the same proposal and must
+    still change nothing.
+    """
+
+    plans: list = field(default_factory=list)
+    error: Exception | None = None
+    calls: list[str] = field(default_factory=list)
+    schemas: list = field(default_factory=list)
+
+    def with_structured_output(self, schema):
+        self.schemas.append(schema)
+        return self
+
+    async def ainvoke(self, messages, **_kwargs):
+        text = "\n".join(str(getattr(message, "content", "")) for message in messages)
+        self.calls.append(text)
+        if self.error is not None:
+            raise self.error
+        if not self.plans:
+            raise AssertionError("PlanModel was called with no scripted plans")
+        index = min(len(self.calls) - 1, len(self.plans) - 1)
+        return self.plans[index]
+
+    @property
+    def invocations(self) -> int:
+        return len(self.calls)
+
+    @property
+    def last_prompt(self) -> str:
+        return self.calls[-1] if self.calls else ""

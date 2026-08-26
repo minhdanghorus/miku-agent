@@ -35,7 +35,11 @@ considered and rejected there for stated reasons.
   graph is still three nodes.
 - `miku/runtime/budget.py` — one request allowance per turn, shared by reference with any
   delegated subgraph.
-- `miku/memory/checkpointer.py` — thread state. `miku/memory/store.py` — cross-thread facts.
+- `miku/memory/checkpointer.py` — thread state. `miku/memory/store.py` — cross-thread facts,
+  including the tombstone fields and the `live_facts` view the pass reads.
+- `miku/memory/plan.py` — what a model may propose about memory, and `validate_plan`, the pure
+  gate every write goes through. `miku/memory/consolidate.py` — the pass itself: a plain async
+  function, deliberately not a subgraph.
 - `miku/tools/` — `create_event` / `list_events` / `remember` / `propose_slots`, plus
   `registry.py` and the injectable `clock.py`. `proposals.py` is the delegating tool; it needs
   the whole session, so `open_session` appends it after `Deps` exists.
@@ -58,6 +62,8 @@ uv run miku --thread work  # resume a named conversation
 uv run pytest              # the whole suite
 uv run pytest -k live      # only the cases that call the real provider
 uv run pytest evals/deterministic/test_fanout.py   # fan-out shape, no credentials
+uv run miku consolidate            # show what tidying memory would do (writes nothing)
+uv run miku consolidate --apply    # actually resolve them
 uv run ruff check .        # lint (must be clean)
 ```
 
@@ -75,6 +81,15 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
   unprobed capability is `"unknown"` and counts as unsupported.
 - **Evaluators assert on tool calls and stored rows, never on reply wording.** Small models
   phrase things differently every run; a stored row does not.
+- **A stored fact is never deleted, and its text is never rewritten.** Resolution is recorded
+  by stamping `superseded_at` onto the row. `superseded_at` — not `superseded_by` — is what
+  makes a row dead, because an expired fact has no successor to point at. Absent means live,
+  which is why the pre-consolidation database needed no migration.
+- **A model proposes changes to memory; code applies them.** The consolidation model never
+  touches the store and is never given a tool that could. Its plan goes through `validate_plan`
+  first, and one of those checks is not stylistic: a supersession must point from older to
+  newer by `created_at`. The plausible model error is direction, and getting it wrong would
+  reinstate the exact bug consolidation exists to fix.
 - **Keep the two memory tiers apart.** The checkpointer is not for facts; the store is not for
   message history.
 - **A tool that overlaps another tool's scope must say when *not* to use it.** Measured, not
@@ -97,8 +112,20 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 
 ## Known limits (deliberate, not oversights)
 
-- No retrieval gate and no consolidation: every fact rides along in every turn. Fine at tens,
-  wrong at thousands. This is Phase 2.5, the next change.
+- No retrieval gate and no selection: every live fact rides along in every turn. Fine at tens,
+  wrong at thousands. This is the second Phase 2.5 change, gated on a spike measuring whether
+  similarity retrieval works on facts of this shape.
+- Consolidation never runs on its own. No threshold, no schedule, no tool — someone types
+  `miku consolidate`. Automatic triggering would put a variable-latency, variable-cost model
+  call into a random turn, which is the hardest kind of behaviour to debug.
+- Consolidation reads the whole live fact set in one model call. True at tens, untested at
+  hundreds. The run's own budget bounds the damage; chunking is unbuilt.
+- `merge` is exercised only against the stub. Three live runs over a nine-fact seed proposed
+  `supersede`, `duplicate`, and `expire` and never a merge, so whether gemma reaches for it on
+  real data is unknown.
+- The supersession direction guard has never fired in the wild — 0 dropped across three live
+  runs. Asserted in tests, unproven in practice. Kept anyway: one timestamp comparison against
+  a failure that would be silent.
 - No prompt caching — unverified on GreenNode, so full context is re-sent each turn.
 - No node cache. It was planned for Phase 2 and then dropped on inspection: branch inputs are
   deliberately never identical, so there is nothing for it to hit.

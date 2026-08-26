@@ -454,9 +454,80 @@ start rather than discovering while writing the first judge eval.
 |---|---|
 | 1 | CLI · hand-built StateGraph · provider registry · scheduling tools · SqliteSaver + Store (`remember`) · JSONL tracing · deterministic evals |
 | 2 | Best-of-N fan-out (`propose_slots` tool wrapping a `Send` subgraph) · per-turn budget · node cache · span/parent tracing |
-| 2.5 | Retrieval gate · fact consolidation · embeddings (`bge-m3`) |
+| 2.5a | Fact consolidation: supersede / duplicate / merge / expire, tombstoned, behind `miku consolidate` |
+| 2.5b | Selection: embeddings (`bge-m3`), top-k recall, and the similarity threshold that gives gating for free. Gated on a spike |
 | 3 | Judge evals (`LLMJudge`) · **UI, two surfaces** (see below) |
 | later | OTel spans · other gateways · guardrails · semantic search over memory |
+
+### Measured: an unresolved contradiction books the wrong time
+
+Phase 2.5a's motivating claim, tested end to end rather than argued. Two facts, one scratch
+database, the same scheduling question put to the real fan-out three times per arm, on
+`google/gemma-4-31b-it`.
+
+Seed: *"I prefer meetings in the morning"* (dated March) and *"I prefer meetings in the
+afternoon"* (dated August). Neither announces itself as the newer one.
+
+| | Facts in context | Recommendation | Runs |
+|---|---|---|---|
+| Unconsolidated | 2 | Mon 31 Aug, **09:00** | 3 of 3 |
+| Consolidated | 1 | Mon 31 Aug, **14:00** | 3 of 3 |
+
+Unconsolidated, the agent books the **stale** March preference, deterministically. That is the
+prompt-shape argument confirmed: `build_system_prompt` renders facts as bare bullets with the
+timestamps stripped, so a flat contradiction leaves the model nothing to resolve it with and it
+settles on the wrong one. After consolidation the survivor drives the answer and the reply names
+the reason unprompted.
+
+**The bound matters as much as the result.** A first attempt found nothing, and it is recorded
+in the change's design doc because it says where consolidation is and is not load-bearing. That
+seed used *"I've switched to afternoons for meetings now; mornings are for deep work"* — which
+dates itself in its own wording. Both arms answered 14:00, 3 of 3. The model resolves a
+correction that announces itself, without help.
+
+So: consolidation matters exactly when facts do **not** date themselves, which is most of how
+people phrase preferences out loud. When a correction is explicit, consolidation is only
+housekeeping.
+
+### Why Phase 2.5 became two changes
+
+The original line bundled three things that turned out to have different urgency and
+different risk.
+
+**Contradiction hurts now; selection does not.** The Phase 2 judge probe measured one
+remembered habit flipping the fan-out's chosen slot 0 -> 1, 3/3 on both models. So a stale
+fact sitting beside its correction competes for every scheduling decision, and it does that at
+*tens* of facts — the scale this repo is already at. Top-k selection only starts to matter at
+thousands. Consolidation therefore goes first, and it needs no embeddings, no new dependency,
+and no spike.
+
+**The retrieval gate was dropped, then partly reinstated as a question.** The waku-style gate —
+a small model deciding whether a turn needs memory — does not survive this provider's catalog:
+`fast` resolves to the same `google/gemma-4-31b-it` that `main` does, so the gate is not a cheap
+model gating an expensive one, it is gemma called twice. It taxes every turn, most visibly the
+cheap ones it exists to protect, and its failure modes are asymmetric: loading facts
+unnecessarily is mild and visible, while skipping facts the turn needed is rare, invisible, and
+the worst thing a memory system can do.
+
+Two cheaper ways to get the same protection are on the table for 2.5b:
+
+1. **A similarity threshold.** If nothing scores above it, recall returns nothing — that is the
+   gate, obtained from a number on the embed call selection already pays for.
+2. **Memory as a tool.** Facts are absent from the prompt by default and arrive only when the
+   model calls `recall_memory`. This is Phase 2's own lesson reapplied: choosing a tool is
+   already the model's decision surface, which is why `propose_slots` beat a router node. It
+   taxes only the turns that use memory, where a gate taxes all of them. Its real cost is that
+   facts then live in message history and get checkpointed.
+
+Both are cheaper than a model-call gate. Which one wins is a measurement, not an argument — the
+open pollution spike below.
+
+**Staleness stopped being a TTL.** `TTLConfig` was the plan and did not survive contact with
+the data: it expires by age alone, so it cannot tell "this week I'm in Hanoi" from "I prefer
+meetings in the morning". A blanket TTL retires durable preferences, which is the same
+information loss consolidation exists to prevent, arriving by a different road. Expiry became
+the fourth operation in the plan the pass already produces — same call, same validation, same
+tombstone, no extra cost, and it can read that a fact is time-bound.
 
 ### UI requirement (Phase 3) — two surfaces, one server
 
@@ -475,6 +546,12 @@ logic from waku transfers essentially unchanged, since it only cares about the e
 
 ## Open questions
 
+- **The pollution spike, open.** Does carrying facts into a turn that does not need them
+  actually change anything? Method: ~15 realistic facts, ~10 unrelated simple turns ("hello",
+  "what is 2+2"), each run with and without facts. Compare replies, watch for the agent
+  volunteering memory unprompted, and watch for a scheduling tool called on a turn about
+  nothing. If the pairs match, pollution is imaginary and clean facts are enough. If they
+  diverge, the number decides between the threshold and memory-as-a-tool above.
 - Judge model choice: `openai/gpt-4o-mini` via GreenNode as judge against a
   gemma/qwen agent? Needs a sanity check that the judge is actually stronger than the agent
   on the dimension being judged.
