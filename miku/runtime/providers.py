@@ -9,7 +9,7 @@ chunks.
 What it does own is the part LangChain has no opinion about:
 
   * which provider is active, and where its key and base URL come from
-  * which concrete model serves which ROLE (main / fast / judge / embed)
+  * which concrete model serves which ROLE (main / fast / judge / select / embed)
   * what each model can actually do (see CAPABILITIES below — this is not
     theoretical: qwen3-5-27b refuses native structured output while the other
     two GreenNode models accept it)
@@ -30,7 +30,7 @@ from typing import Literal
 
 from miku.runtime.config import Settings
 
-ROLES = ("main", "fast", "judge", "embed")
+ROLES = ("main", "fast", "judge", "select", "embed")
 
 Capability = Literal["yes", "no", "unknown"]
 
@@ -92,9 +92,23 @@ GREENNODE = Provider(
     models={
         "main": _GEMMA,
         "fast": _GEMMA,
-        # A different model than main, on purpose: a model grading its own
-        # output is a well-known way to get flattering scores.
-        "judge": _GPT4O_MINI,
+        # The same model as main, against the usual advice, because the usual
+        # advice lost to a measurement. `judge` pointed at gpt-4o-mini on the
+        # sound principle that a model grading its own output tends to flatter
+        # it. Measured over 18 cases x 2 runs, that model returned "fail" for
+        # every case on any dimension needing temporal reasoning -- correct and
+        # incorrect alike -- scoring 3/6, exactly the accuracy of a constant
+        # function. Gemma scored 18/18 twice. A flattering judge still carries
+        # signal; a constant one carries none. See "Measured: the judge could
+        # not judge" in the exploration doc. Reversible in one line the moment
+        # this provider offers a third capable chat model.
+        "judge": _GEMMA,
+        # Separate from `judge` even though both name gemma today, because they
+        # are chosen for different work and will diverge. `judge` grades evals
+        # and moves the moment a better evaluator exists; `select` picks a slot
+        # for a real user and must not follow it there. They were one role until
+        # the judge remap moved production behaviour as a side effect.
+        "select": _GEMMA,
         "embed": _BGE_M3,
     },
     capabilities={

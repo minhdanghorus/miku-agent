@@ -59,9 +59,11 @@ from miku.tools.clock import Clock
 
 # Not a new entry in ROLES. Consolidation is not latency-sensitive, so if `fast`
 # ever stops being an alias for `main` on this provider, `main` is the one that
-# should keep doing this work. `judge` was rejected for a different reason: it
-# exists so evaluation is graded by a model other than the one being graded, and
-# borrowing it for production work would make that claim ambiguous.
+# should keep doing this work. `judge` is rejected for a separate reason that
+# survives it now resolving to the same model: a role names what work a model is
+# chosen for, not which model it happens to be today. `judge` is chosen for
+# grading, and the moment a stronger evaluator appears it moves -- production
+# work must not follow it there.
 CONSOLIDATION_ROLE = "main"
 
 INSTRUCTIONS = """\

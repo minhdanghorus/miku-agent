@@ -390,7 +390,7 @@ def make_select_best_node(deps: Deps):
         if turn.budget.spend():
             try:
                 async with model_semaphore(deps.settings.max_concurrency):
-                    reply = await deps.judge_model.ainvoke(
+                    reply = await deps.select_model.ainvoke(
                         [SystemMessage(content=JUDGE_ROLE), HumanMessage(content=prompt)]
                     )
                 chosen = _parse_choice(str(reply.content), len(ordered))

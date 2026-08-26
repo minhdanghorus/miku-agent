@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     model_main: str = ""
     model_fast: str = ""
     model_judge: str = ""
+    model_select: str = ""
     model_embed: str = ""
 
     # The loop's hard stop. Reaching it ends the turn with a reply saying so.
@@ -64,6 +65,7 @@ class Settings(BaseSettings):
             "main": self.model_main,
             "fast": self.model_fast,
             "judge": self.model_judge,
+            "select": self.model_select,
             "embed": self.model_embed,
         }.get(role, "")
 

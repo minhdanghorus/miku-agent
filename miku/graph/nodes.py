@@ -68,13 +68,13 @@ class Deps:
     # so a stub can be substituted for all three at once, and so the fan-out's
     # use of the cheap role is visible here rather than buried in a call site.
     fast_model: object | None = None
-    judge_model: object | None = None
+    select_model: object | None = None
 
     def __post_init__(self) -> None:
         # One injected model stands in for every role: that is what lets the
         # eval suite drive the whole graph, fan-out included, with one stub.
         self.fast_model = self.fast_model or self.model
-        self.judge_model = self.judge_model or self.model
+        self.select_model = self.select_model or self.model
 
 
 @dataclass

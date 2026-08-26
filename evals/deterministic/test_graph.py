@@ -231,3 +231,19 @@ async def test_every_node_transition_is_traced(settings):
     nodes = [r["node"] for r in records if r["kind"] == "node"]
     assert nodes == ["assemble", "agent", "tools", "agent"]
     assert all(r["turn_id"] == result.turn_id for r in records)
+
+
+def test_the_fanout_selects_on_the_select_role_not_the_judge_role():
+    """A production choice must not follow the evaluator's model. Asserted on the
+    wiring rather than on a live call: `Deps` is where the two roles stop being
+    interchangeable."""
+    import inspect
+
+    from miku.graph import fanout
+    from miku.graph.nodes import Deps
+
+    assert "select_model" in Deps.__dataclass_fields__
+    assert "judge_model" not in Deps.__dataclass_fields__
+    source = inspect.getsource(fanout)
+    assert "deps.select_model" in source
+    assert "deps.judge_model" not in source

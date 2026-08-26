@@ -121,13 +121,47 @@ def test_judge_and_chat_resolve_from_one_config(key):
     assert judge.model_name == resolve_model(settings, "judge")
 
 
-def test_judge_defaults_to_a_different_model_than_the_agent(key):
-    """A model grading its own output is the bias we are avoiding."""
+def test_two_roles_may_resolve_to_one_model(key):
+    """The previous version of this test asserted judge != main, which the spec
+    never required -- its scenario is conditional ("may differ"). It encoded a
+    policy, and the policy lost to a measurement: the distinct judge returned a
+    constant "fail" on anything involving a date. What the spec does require is
+    that each role resolves to a declared id, and that two roles sharing one is
+    not an error."""
     settings = load_settings(provider="greennode")
-    assert resolve_model(settings, "judge") != resolve_model(settings, "main")
+    judge = resolve_model(settings, "judge")
+
+    assert judge == resolve_model(settings, "main")
+    assert judge in GREENNODE.capabilities
+
+
+def test_the_judge_role_can_be_pointed_elsewhere(monkeypatch, key):
+    """How the judge-strength spike compared two judges without editing the
+    descriptor. Keeping it exercisable is what makes the remap reversible."""
+    monkeypatch.setenv("MIKU_MODEL_JUDGE", "openai/gpt-4o-mini")
+    settings = load_settings(provider="greennode")
+
+    assert resolve_model(settings, "judge") == "openai/gpt-4o-mini"
+    assert judge_model(settings).model_name == "openai/gpt-4o-mini"
+    assert resolve_model(settings, "main") == GREENNODE.models["main"]
 
 
 def test_judge_missing_key_fails_before_any_request(monkeypatch):
     monkeypatch.delenv(KEY_ENV, raising=False)
     with pytest.raises(ProviderError):
         judge_model(load_settings(provider="greennode"))
+
+
+def test_selection_and_grading_are_separate_roles(key, monkeypatch):
+    """They name gemma both, and that is not the same as being one role. `judge`
+    moves whenever a better evaluator appears; `select` picks a slot a real
+    person is offered. Pointing one elsewhere must not drag the other with it --
+    the whole reason the roles were split."""
+    settings = load_settings(provider="greennode")
+    assert resolve_model(settings, "select") == GREENNODE.models["select"]
+
+    monkeypatch.setenv("MIKU_MODEL_JUDGE", "openai/gpt-4o-mini")
+    moved = load_settings(provider="greennode")
+
+    assert resolve_model(moved, "judge") == "openai/gpt-4o-mini"
+    assert resolve_model(moved, "select") == GREENNODE.models["select"]

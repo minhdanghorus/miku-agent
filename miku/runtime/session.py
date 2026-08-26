@@ -131,16 +131,22 @@ async def open_session(
     settings.ensure_dirs()
 
     async with open_store(settings) as store, open_checkpointer(settings) as checkpointer:
-        fast_model = judge_model = model
+        fast_model = select_model = model
         if model is None:
             from miku.runtime.providers import chat_model
 
             model = chat_model(settings, "main")
             # The fan-out's branches run on the cheap role and its selection on
-            # the judge role. Today's descriptor maps main and fast to the same
-            # model, so this buys nothing yet -- it puts the seam where it goes.
+            # `select`. Today's descriptor points main, fast and select at one
+            # model, so this buys nothing yet -- it puts the seams where they go.
+            #
+            # `select` and not `judge`, though both name gemma right now: `judge`
+            # is chosen for grading evals and will move to whatever grades best,
+            # while this picks a slot a real person will be offered. They were
+            # the same role until remapping the judge silently moved scheduling
+            # behaviour, which is the argument for keeping them apart.
             fast_model = chat_model(settings, "fast")
-            judge_model = chat_model(settings, "judge")
+            select_model = chat_model(settings, "select")
 
         provider = get_provider(settings)
         tracer = Tracer(
@@ -156,7 +162,7 @@ async def open_session(
             tracer=tracer,
             clock=clock or Clock.real(),
             fast_model=fast_model,
-            judge_model=judge_model,
+            select_model=select_model,
         )
         # A delegating tool needs the session it runs inside -- its subgraph
         # calls the same models and reads the same store -- so it cannot be

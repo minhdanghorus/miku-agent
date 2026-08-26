@@ -22,7 +22,8 @@ considered and rejected there for stated reasons.
   no tool execution, no memory reads. That constraint is what makes a second gateway cheap.
 - `miku/runtime/config.py` — every knob, `MIKU_`-prefixed. **Nothing else reads the
   environment**, except `providers.py` reading the provider key.
-- `miku/runtime/providers.py` — the provider adapter. Roles (`main`/`fast`/`judge`/`embed`),
+- `miku/runtime/providers.py` — the provider adapter. Roles
+  (`main`/`fast`/`judge`/`select`/`embed`),
   per-model capability flags, and two builders: `chat_model(role)` for LangChain,
   `judge_model()` for pydantic-evals.
 - `miku/runtime/session.py` — one session: store + checkpointer + tools + model + tracer +
@@ -48,7 +49,9 @@ considered and rejected there for stated reasons.
   a tree.
 - `miku/SOUL.md` — the persona: name and tone only.
 - `evals/deterministic/` — tests. `evals/task.py` is the single task function cases drive;
-  `evals/evaluators.py` holds the evaluators; `evals/helpers.py` has the stub model.
+  `evals/evaluators.py` holds the evaluators; `evals/helpers.py` has the stub model. All but one
+  evaluator reads tool calls and stored rows; `JudgedHonest` is the exception, and the reason it
+  is allowed to read a reply is in the rule below.
 - Runtime state lives in `.miku/` (state.db, traces/) — gitignored.
 
 ## Environment and commands
@@ -60,7 +63,7 @@ uv sync --extra dev        # install
 uv run miku                # talk to Miku (new thread)
 uv run miku --thread work  # resume a named conversation
 uv run pytest              # the whole suite
-uv run pytest -k live      # only the cases that call the real provider
+uv run pytest -k live      # only the cases that call the real provider (judged cases included)
 uv run pytest evals/deterministic/test_fanout.py   # fan-out shape, no credentials
 uv run miku consolidate            # show what tidying memory would do (writes nothing)
 uv run miku consolidate --apply    # actually resolve them
@@ -80,7 +83,19 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 - **Capability flags are declared, never inferred.** No `if model == "qwen..."` anywhere. An
   unprobed capability is `"unknown"` and counts as unsupported.
 - **Evaluators assert on tool calls and stored rows, never on reply wording.** Small models
-  phrase things differently every run; a stored row does not.
+  phrase things differently every run; a stored row does not. One judged evaluator exists,
+  `JudgedHonest`, and only because the claim it checks — that Miku never says it scheduled,
+  remembered, or looked up something no tool returned — lives in the reply and nowhere else. A
+  judged evaluator is never added where a deterministic one can carry the claim: a bad judge
+  fails *correct* code, so every judged assertion is a place a future judge regression can waste
+  an afternoon. It is handed the turn's tool calls rather than asked to infer them, which is what
+  keeps the dimension close to objective.
+- **A role names the work a model is chosen for, not the model.** `main`, `fast`, `judge` and
+  `select` all resolve to gemma today; that is a measured choice, not an oversight, and it does
+  not make them interchangeable. `judge` grades evals and moves the moment a better evaluator
+  exists — so nothing a user runs may resolve it. This rule has already been paid for once:
+  `select` exists because the fan-out picked slots on `judge`, and remapping the judge moved a
+  production choice as a side effect. Two roles naming one model is not two names for one thing.
 - **A stored fact is never deleted, and its text is never rewritten.** Resolution is recorded
   by stamping `superseded_at` onto the row. `superseded_at` — not `superseded_by` — is what
   makes a row dead, because an expired fact has no successor to point at. Absent means live,
@@ -112,9 +127,23 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 
 ## Known limits (deliberate, not oversights)
 
-- No retrieval gate and no selection: every live fact rides along in every turn. Fine at tens,
-  wrong at thousands. This is the second Phase 2.5 change, gated on a spike measuring whether
-  similarity retrieval works on facts of this shape.
+- No selection: every live fact rides along in every turn. Fine at tens, wrong at thousands, and
+  Phase 2.5b's only remaining justification is that scale. There is deliberately no retrieval
+  gate either — the pollution spike measured 40 live turns with and without facts and found 0
+  stray tool calls, 0 facts volunteered unprompted, and differences confined to wording, so all
+  three proposed gates were solving a harm that does not occur here.
+- The judge is the same model as the agent. `gemma` grades `gemma`, which is the configuration
+  self-grading bias lives in, and the spike that chose it could not detect that: all 18 of its
+  cases had objective answers, so flattery had nowhere to appear. It measured capability, not
+  bias. Judged evaluation is therefore kept to claims with defensible answers, and subjective
+  scoring is unbuilt rather than untrusted.
+- Four of five roles now resolve to one model, so nothing exercises role divergence. The seam
+  still earns its place — `resolve_model` is where a second provider plugs in — but the fact that
+  roles *can* differ is currently asserted only by tests that override one.
+- Moving the fan-out's selection from `gpt-4o-mini` to gemma was a side effect of the judge
+  remap, caught during implementation rather than designed. It is very likely an improvement — a
+  slot picker was running on the one catalog model measured twice to be unable to reason about
+  dates — but *likely* is the honest word. It is unmeasured.
 - Consolidation never runs on its own. No threshold, no schedule, no tool — someone types
   `miku consolidate`. Automatic triggering would put a variable-latency, variable-cost model
   call into a random turn, which is the hardest kind of behaviour to debug.
