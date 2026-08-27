@@ -35,6 +35,14 @@ header {
   padding-bottom: 0.75rem;
 }
 
+.logo {
+  align-self: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+}
+
 h1 {
   font-size: 1.1rem;
   margin: 0;
