@@ -52,12 +52,61 @@ class TurnResult:
 class Session:
     """Runs turns against one compiled graph."""
 
-    def __init__(self, settings: Settings, graph, deps: Deps, budget: Budget):
+    def __init__(self, settings: Settings, graph, deps: Deps, budget: Budget, checkpointer):
         self.settings = settings
         self.graph = graph
         self.deps = deps
         # A template, not a counter: every turn clones its own allowance off it.
         self.budget = budget
+        self._checkpointer = checkpointer
+
+    # The handles a gateway is allowed to want, offered by name.
+    #
+    # Phase 3b recorded that the web gateway reached past `open_session` twice
+    # -- `deps.tools` and `deps.store` -- and refused to add accessors, because
+    # the count was the measurement that phase existed to take. A conversation
+    # screen needs a third handle, and reaching for it would have reported a
+    # number nobody chose. The measurement is spent here, once, rather than
+    # allowed to drift.
+
+    @property
+    def checkpointer(self):
+        """Thread state, for reading conversations back. Read through
+        `runtime/inspect.py`; this is only how a gateway gets the handle."""
+        return self._checkpointer
+
+    @property
+    def tools(self) -> list:
+        return self.deps.tools
+
+    @property
+    def store(self):
+        return self.deps.store
+
+    async def delete_conversation(self, thread_id: str) -> None:
+        """Remove one conversation's thread state, and nothing else.
+
+        A write, deliberately here rather than in `inspect.py`, which is
+        read-only. This is the shape `run_turn` has had since Phase 1: a gateway
+        calls a session method and the session writes. The rule a gateway must
+        not break is that it reads no source directly, which a session call does
+        not touch.
+
+        It reaches one store of three. Remembered facts are namespaced by user,
+        not by thread, and trace lines carry `turn_id` and nothing that names a
+        thread -- so neither is reachable from a conversation identifier. The
+        interface says so before the removal happens; see the cockpit's
+        confirmation.
+
+        Removing a conversation that does not exist is not an error. Absence is
+        the state the caller asked for. That includes a database no turn has
+        touched yet -- the checkpointer creates its tables on first use, and a
+        delete is the one operation that reaches them without going through the
+        call that would have made them. `setup` is idempotent; skipping it makes
+        removal the only endpoint that fails on a fresh install.
+        """
+        await self._checkpointer.setup()
+        await self._checkpointer.adelete_thread(thread_id)
 
     async def run_turn(
         self,
@@ -178,4 +227,5 @@ async def open_session(
             build_graph(deps, checkpointer=checkpointer),
             deps,
             Budget(limit=settings.max_requests_per_turn),
+            checkpointer,
         )

@@ -42,6 +42,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Actually write. Without it, the plan is printed and nothing changes.",
     )
+    commands.add_parser("threads", help="List held conversations.")
+    # Deliberately no removal flag. The listing is what the two gateways share;
+    # the write is not, and a destructive terminal flag deserves its own
+    # argument rather than a ride on a read.
     return parser.parse_args(argv)
 
 
@@ -156,6 +160,47 @@ def print_consolidation_report(result) -> None:
               f"{result.live_before} facts live before, {result.live_after} after.")
 
 
+def print_thread_listing(views) -> None:
+    """Held conversations, newest first, in ASCII.
+
+    Two columns are load-bearing rather than decorative. The identifier is what
+    `--thread` takes, so a listing that omitted it would be a listing you could
+    not act on. The message count is the cost of resuming: every stored message
+    is re-sent on every turn, with no trimming and no prompt caching, so a long
+    conversation is an expensive one and this is where that becomes visible.
+    """
+    if not views:
+        print("  no conversations yet.")
+        return
+
+    for view in views:
+        when = view.updated_at[:16].replace("T", " ")
+        count = f"{view.message_count} msg" + ("" if view.message_count == 1 else "s")
+        print(f"  {view.thread_id:10} {when:16} {count:>8}  {view.title or '(no title yet)'}")
+    print("")
+    print(f"  resume one with: miku --thread {views[0].thread_id}")
+
+
+async def list_threads() -> int:
+    """Print what conversations exist. Reads through the inspection surface.
+
+    It opens a checkpointer rather than a whole session on purpose: a listing
+    that demanded provider credentials to print eight identifiers would be
+    charging for a read. Opening the handle is not reading the source -- the
+    reading is `inspect.thread_list`, the same call the web gateway makes, which
+    is the second time the peer-gateway constraint has paid out.
+    """
+    from miku.memory.checkpointer import open_checkpointer
+    from miku.runtime.inspect import thread_list
+
+    settings = load_settings()
+    async with open_checkpointer(settings) as checkpointer:
+        views = await thread_list(checkpointer)
+        print(f"miku - {len(views)} conversation" + ("" if len(views) == 1 else "s"))
+        print_thread_listing(views)
+        return 0
+
+
 async def consolidate_memory(apply: bool) -> int:
     """Open the pass, run it once, print what it did. No logic beyond that."""
     from miku.memory.consolidate import open_consolidation
@@ -203,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "consolidate":
             return asyncio.run(consolidate_memory(apply=args.apply))
+        if args.command == "threads":
+            return asyncio.run(list_threads())
         return asyncio.run(chat(thread_id))
     except ProviderError as error:
         # Configuration is the one failure we want loud and early — but as a

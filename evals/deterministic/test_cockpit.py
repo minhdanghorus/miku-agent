@@ -79,6 +79,10 @@ async def test_the_cockpit_page_and_its_assets_are_served(settings):
     # that shows a turn. Without them the module has nothing to paint into.
     assert 'id="diagram"' in page.text
     assert 'id="trace-diagram"' in page.text
+    # And the conversation screen's two: the sidebar it lists into and the
+    # transcript it renders into.
+    assert 'id="thread-list"' in page.text
+    assert 'id="transcript"' in page.text
 
 
 def test_the_repository_declares_no_javascript_toolchain():
@@ -91,6 +95,27 @@ def test_the_repository_declares_no_javascript_toolchain():
     assert not present, f"a frontend toolchain crept in: {present}"
 
     assert not (REPO / "node_modules").exists()
+
+
+def test_the_composer_sits_inside_the_conversation_it_belongs_to():
+    """It used to sit above the tab strip, where it belonged to nothing.
+
+    Structure, not appearance: the form is inside the pane that shows a
+    conversation, below the transcript and above the turn's event tree. That
+    ordering is the whole change, and it is the kind of thing a later edit
+    reverts without noticing.
+    """
+    page = (STATIC / "index.html").read_text(encoding="utf-8")
+
+    pane = page.index('id="pane-live"')
+    transcript = page.index('id="transcript"')
+    composer = page.index('id="composer"')
+    tree = page.index('id="live-tree"')
+
+    assert pane < transcript < composer < tree
+    # And no longer above the tabs, which is where it was when it served every
+    # pane and belonged to none of them.
+    assert page.index('class="tabs"') < composer
 
 
 def test_the_page_loads_its_script_as_a_module_without_a_bundle():
@@ -833,3 +858,135 @@ def test_the_renderer_escapes_what_a_record_carries():
 
     assert not shape["raw"], "a record's text was rendered as markup"
     assert shape["escaped"]
+
+
+# --- The transcript ---------------------------------------------------------
+
+# One `remember` turn, as `conversation_view` reports it -- which is to say, as
+# the real database stores it once the empty `AIMessage` carrying the call has
+# been dropped. Not invented: this shape was read back from `.miku/state.db`
+# before the renderer was written.
+CONVERSATION = [
+    {"role": "user", "text": "Beside Naruto, I also like Detective Conan"},
+    {"role": "tool", "text": "Remembered: Dang likes Detective Conan"},
+    {"role": "tool", "text": "Remembered: Dang likes Dragon Ball"},
+    {"role": "assistant", "text": "Got it. I've added those to your preferences."},
+]
+
+
+@needs_node
+def test_a_tool_calling_turn_renders_its_tool_lines_and_no_empty_bubble():
+    """Tool activity is always shown, and never as something the assistant said.
+
+    Folding these behind a "2 calls" summary was considered and rejected: the
+    tool line is the evidence that "I've added those to your preferences" is
+    more than plausible, and without it the transcript says Miku replied and not
+    that she did anything.
+    """
+    shape = run_node(
+        "import { renderTranscript } from './app.js';"
+        f"const html = renderTranscript({json.dumps(CONVERSATION)});"
+        "console.log(JSON.stringify({"
+        "  user: (html.match(/class=\"said user\"/g) || []).length,"
+        "  assistant: (html.match(/class=\"said assistant\"/g) || []).length,"
+        "  tool: (html.match(/class=\"said tool\"/g) || []).length,"
+        "  keptVerbatim: html.includes('Remembered: Dang likes Dragon Ball'),"
+        "  empty: html.includes('></li>')}));"
+    )
+
+    assert shape == {
+        "user": 1,
+        "assistant": 1,
+        "tool": 2,
+        "keptVerbatim": True,
+        "empty": False,
+    }
+
+
+@needs_node
+def test_a_trace_route_is_offered_only_where_a_turn_is_known():
+    """`turn_id` is reported when a turn runs and is not in checkpointed state.
+
+    A conversation read back from storage therefore has none, and gets no route
+    rather than a broken one.
+    """
+    shape = run_node(
+        "import { renderTranscript } from './app.js';"
+        f"const said = {json.dumps(CONVERSATION)};"
+        "console.log(JSON.stringify({"
+        "  live: (renderTranscript(said, 'turn-9').match(/to-trace/g) || []).length,"
+        "  stored: (renderTranscript(said).match(/to-trace/g) || []).length}));"
+    )
+
+    assert shape == {"live": 1, "stored": 0}
+
+
+@needs_node
+def test_the_transcript_renders_text_as_text():
+    """Markup in a message is content, not markup. Markdown would need a library,
+    which would need a build step or a CDN -- both forbidden two cases above."""
+    said = [{"role": "user", "text": "<script>alert('x')</script> & \"quoted\""}]
+    shape = run_node(
+        "import { renderTranscript } from './app.js';"
+        f"const html = renderTranscript({json.dumps(said)});"
+        "console.log(JSON.stringify({"
+        "  raw: html.includes('<script>'),"
+        "  escaped: html.includes('&lt;script&gt;')}));"
+    )
+
+    assert shape == {"raw": False, "escaped": True}
+
+
+@needs_node
+def test_an_empty_conversation_and_a_missing_field_both_render():
+    """Absence is data on this side too. An exchange with no text is a row the
+    server can legitimately produce, and it must not blank the whole screen."""
+    shape = run_node(
+        "import { renderTranscript } from './app.js';"
+        "const partial = renderTranscript([{role: 'assistant'}]);"
+        "console.log(JSON.stringify({"
+        "  empty: renderTranscript([]).includes('nothing said yet'),"
+        "  partial: partial.includes('said assistant'),"
+        "  undefinedLeaked: partial.includes('undefined')}));"
+    )
+
+    assert shape == {"empty": True, "partial": True, "undefinedLeaked": False}
+
+
+@needs_node
+def test_the_thread_list_names_a_conversation_that_has_no_title_by_its_identifier():
+    """Listed rather than hidden. Hiding it would leave state nothing on the page
+    can reach -- and it is that decision, not the transcript, that put a remove
+    button in this phase, so every listed row carries one."""
+    threads = [
+        {"thread_id": "anime", "title": "Beside Naruto", "message_count": 4},
+        {"thread_id": "blank", "title": "", "message_count": 0},
+    ]
+    shape = run_node(
+        "import { renderThreads } from './app.js';"
+        f"const html = renderThreads({json.dumps(threads)}, 'anime');"
+        "console.log(JSON.stringify({"
+        "  rows: (html.match(/class=\"thread\"/g) || []).length,"
+        "  blankNamed: html.includes('>blank<'),"
+        "  removals: (html.match(/data-remove/g) || []).length,"
+        "  current: (html.match(/aria-current/g) || []).length,"
+        "  counts: html.includes('0 msgs') && html.includes('4 msgs')}));"
+    )
+
+    assert shape == {
+        "rows": 2,
+        "blankNamed": True,
+        "removals": 2,
+        "current": 1,
+        "counts": True,
+    }
+
+
+@needs_node
+def test_an_empty_listing_is_a_sentence_not_a_blank_sidebar():
+    shape = run_node(
+        "import { renderThreads } from './app.js';"
+        "console.log(JSON.stringify({html: renderThreads([])}));"
+    )
+
+    assert "no conversations yet" in shape["html"]

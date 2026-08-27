@@ -26,6 +26,7 @@ uv sync --extra dev          # install
 cp .env.example .env         # then paste your provider key into it
 uv run miku                  # talk to Miku
 uv run miku --thread work    # resume a named conversation
+uv run miku threads          # list conversations you can resume
 ```
 
 ### The cockpit (web gateway)
@@ -38,10 +39,22 @@ uv run miku-web                   # http://127.0.0.1:8765
 ```
 
 It watches a turn happen live in the browser instead of the terminal: which node is
-running, which tool it called, and what landed in memory. It reads through the same
-`open_session` entry point as the CLI and shares `.miku/state.db`, so a fact remembered
-in one shows up in the other. It binds to loopback only, has no authentication, and is
-built for one local user — do not expose it.
+running, which tool it called, and what landed in memory. A sidebar lists every
+conversation the agent holds — including ones started in the terminal — so you can open
+one, read it back, and carry it on; the conversation is in the URL, so a reload continues
+it. Each entry shows how many messages it holds, because every one of them is re-sent on
+every turn.
+
+Removing a conversation deletes its messages and nothing else. Facts Miku remembered
+during it are stored against you rather than against the conversation, and its traces are
+keyed by turn, so both survive — the confirmation says so before it happens, and there is
+no undo.
+
+It reads through the same `open_session` entry point as the CLI and shares
+`.miku/state.db`, so a fact remembered in one shows up in the other. It binds to loopback
+only, has no authentication, and is built for one local user — do not expose it. That
+matters more now than it did: the cockpit holds every conversation this agent has ever
+had, and offers an irreversible button beside each one.
 
 Try it: *"Remember that I dislike meetings before 9am."* Quit. Start again.
 *"Book a catch-up with Alex on Saturday."* The fact is still there — it lives in
@@ -190,6 +203,12 @@ No retrieval gate — every remembered fact still rides along in every turn, whi
 at tens and wrong at thousands. No OTel, no guardrails, no semantic search over memory,
 no `.ics` export. The cockpit's appearance is unverified by machine; whether the lit state
 reads correctly to a person is unguarded.
+
+No message trimming either, and this one is measured rather than assumed: a conversation's
+whole history is re-sent on every turn, with no summarisation and no prompt caching, so a
+long conversation is an expensive one. The message count beside each conversation is there
+to make that visible. No token-by-token streaming, no renaming a conversation, and no
+search across them.
 
 No node cache either, and that one is a decision rather than a delay: it was planned for
 Phase 2 and dropped on inspection, because branches are deliberately given different angles,

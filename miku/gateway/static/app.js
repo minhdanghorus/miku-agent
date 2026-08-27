@@ -410,6 +410,88 @@ function link(conditional, when) {
   return `<div class="link${conditional ? " maybe" : ""}"${title}></div>`;
 }
 
+// --- the transcript ---------------------------------------------------------
+
+// One conversation, rendered from what the server says it holds.
+//
+// Pure, exported, and exercised under node for the same reason `paint` and
+// `buildTree` are: the shapes it has to survive -- a turn that called two tools,
+// an exchange missing a field, text containing markup -- are not things
+// eyeballing a page reliably catches.
+//
+// Three roles, three treatments. `user` and `assistant` are bubbles; `tool` is a
+// quiet line between them, always shown. Folding tool lines behind a "2 calls"
+// summary was considered and rejected: it solves crowding nobody has reported,
+// and it costs the thing that makes this a cockpit transcript rather than a chat
+// window. Miku says "I've added those to your preferences"; the tool line is the
+// evidence that the sentence is not merely plausible.
+//
+// Tool text is rendered exactly as it arrived. This project's tools return
+// prose -- "Remembered: Dang likes Detective Conan" -- so there is nothing to
+// parse and nothing to template. `traceTurn` marks the last assistant line with
+// a route to its trace, and is passed only for a reply produced in this session:
+// `turn_id` is not in checkpointed state, so a conversation read back from
+// storage has none, and a missing affordance beats a broken one.
+export function renderTranscript(exchanges, traceTurn = null) {
+  if (!exchanges.length) {
+    // An empty screen is an invitation, and the thing it invites is directly
+    // below it.
+    return '<p class="dim">nothing said yet. type below to start.</p>';
+  }
+
+  const lastSpoken = exchanges.map((entry) => entry.role).lastIndexOf("assistant");
+
+  const lines = exchanges.map((entry, index) => {
+    const text = escape(entry.text ?? "");
+    if (entry.role === "tool") {
+      return `<li class="said tool"><span class="who">tool</span>${text}</li>`;
+    }
+    const role = entry.role === "user" ? "user" : "assistant";
+    const link =
+      traceTurn && role === "assistant" && index === lastSpoken
+        ? ` <a class="to-trace" href="#" data-turn="${escape(traceTurn)}">trace</a>`
+        : "";
+    return `<li class="said ${role}"><span class="who">${escape(role)}</span>${text}${link}</li>`;
+  });
+
+  return `<ul class="transcript-lines">${lines.join("")}</ul>`;
+}
+
+// A sidebar entry per held conversation. The message count rides along because
+// history is unbounded and re-sent every turn: resuming a long conversation is
+// the expensive thing this screen makes easy, so the number sits next to the
+// button that does it.
+//
+// A conversation with nothing in it is listed by its identifier rather than
+// hidden. Hiding it would leave state nothing on the page could reach, which is
+// how a database quietly fills with rows nobody can name -- and it is that
+// decision, not the transcript, that put a remove button in this phase.
+export function renderThreads(threads, current = null) {
+  if (!threads.length) {
+    return '<li class="dim">no conversations yet.</li>';
+  }
+  return threads
+    .map((thread) => {
+      const id = escape(thread.thread_id);
+      const here = thread.thread_id === current ? ' aria-current="true"' : "";
+      const title = escape(thread.title || thread.thread_id);
+      const count = `${thread.message_count} msg${thread.message_count === 1 ? "" : "s"}`;
+      return (
+        `<li class="thread"${here}>` +
+        `<button class="open" data-thread="${id}">` +
+        `<span class="thread-title">${title}</span>` +
+        `<span class="thread-meta">${id} &middot; ${escape(count)}</span>` +
+        `</button>` +
+        // "remove", never "delete" and never "forget". Two of the three stores
+        // that hold this conversation survive it, and the word has to leave
+        // room for the confirmation to say so.
+        `<button class="remove" data-remove="${id}" title="remove conversation">x</button>` +
+        `</li>`
+      );
+    })
+    .join("");
+}
+
 // --- streaming a turn -------------------------------------------------------
 
 // SSE over a POST fetch: one connection per turn. `EventSource` was not used
@@ -435,7 +517,118 @@ async function* readEvents(response) {
   }
 }
 
-const live = { records: [], threadId: null };
+// What the page is looking at. `records` is this turn's trace; `exchanges` is
+// the conversation as the server last reported it, plus whatever this session
+// has since added. `traceTurn` is the identifier of the reply produced here, and
+// is cleared whenever a conversation is loaded from storage -- see
+// `renderTranscript`.
+const live = { records: [], threadId: null, exchanges: [], traceTurn: null };
+
+// The conversation is in the URL rather than in `localStorage`: a reload
+// continues it, a link points at it, and two tabs can hold two conversations.
+// Storage would survive a reload and do none of the rest, while introducing
+// per-browser state to a page whose whole model is that the server holds the
+// truth.
+function threadFromUrl() {
+  const fragment = (location.hash || "").replace(/^#/, "").trim();
+  return fragment || null;
+}
+
+// No label goes with this. The sidebar marks which conversation is open and the
+// transcript shows what is in it; a third line naming it was the same fact told
+// a third time.
+function setThread(threadId) {
+  live.threadId = threadId;
+  const fragment = threadId ? `#${threadId}` : "";
+  if (location.hash !== fragment) {
+    history.replaceState(null, "", fragment || location.pathname);
+  }
+}
+
+// `toEnd` is passed wherever the conversation moved -- a turn finished, or one
+// was opened from the sidebar -- and never on a repaint that only re-renders
+// what was already on screen. The composer is sticky, so without this the newest
+// exchange lands underneath it on a long conversation.
+function paintTranscript(toEnd = false) {
+  const target = $("#transcript");
+  if (!target) return;
+  target.innerHTML = renderTranscript(live.exchanges, live.traceTurn);
+  if (!toEnd) return;
+  // The transcript is its own scroll region now, so this moves that region and
+  // leaves the page where it was. `scrollIntoView` would have walked every
+  // scrollable ancestor and taken the page with it, which is the jump this
+  // layout exists to stop.
+  target.scrollTop = target.scrollHeight;
+}
+
+async function loadThreads() {
+  const threads = await (await fetch("/api/threads")).json();
+  const list = $("#thread-list");
+  if (!list) return;
+  list.innerHTML = renderThreads(threads, live.threadId);
+
+  list.querySelectorAll("button[data-thread]").forEach((button) => {
+    button.addEventListener("click", () => openThread(button.dataset.thread));
+  });
+  list.querySelectorAll("button[data-remove]").forEach((button) => {
+    button.addEventListener("click", () => removeThread(button.dataset.remove));
+  });
+}
+
+async function openThread(threadId) {
+  setThread(threadId);
+  // A conversation read back from storage carries no turn identifier -- it is
+  // not part of checkpointed state -- so any trace route from the previous
+  // conversation is dropped rather than pointed at the wrong turn.
+  live.traceTurn = null;
+  live.exchanges = await (await fetch(`/api/threads/${encodeURIComponent(threadId)}`)).json();
+  showPane("live");
+  paintTranscript(true);
+  await loadThreads();
+}
+
+function startNewThread() {
+  // No identifier until the server issues one on the first turn, which is what
+  // `POST /api/turn` has always done for a request without a thread.
+  setThread(null);
+  live.exchanges = [];
+  live.traceTurn = null;
+  live.records = [];
+  paintTranscript();
+  renderTree($("#live-tree"), []);
+  repaint("#diagram", []);
+  showPane("live");
+  loadThreads().catch(() => {});
+}
+
+// Named for what it does and no more. Removal deletes this conversation's thread
+// state; facts remembered during it are stored against the user and survive, and
+// its traces are keyed by turn and survive too. The confirmation says all three
+// rather than leaving the word "remove" to imply a fourth.
+const REMOVAL_WARNING = [
+  "Remove this conversation?",
+  "",
+  "Its messages go, and cannot be brought back -- there is no undo.",
+  "Facts Miku remembered during it stay in memory.",
+  "Recorded traces of its turns stay in traces.",
+].join("\n");
+
+async function removeThread(threadId) {
+  if (!window.confirm(REMOVAL_WARNING)) return;
+
+  const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    $("#status").textContent = `could not remove ${threadId}`;
+    return;
+  }
+  // Removing the conversation on screen leaves the composer pointed at a new
+  // one, and the URL with it -- never at an identifier the server no longer
+  // holds.
+  if (live.threadId === threadId) startNewThread();
+  await loadThreads();
+}
 
 // Repaint from the whole record set, never from the one that just arrived. The
 // cost is four boxes; the benefit is that this is the same call the traces pane
@@ -451,15 +644,21 @@ function repaint(selector, records, streaming = false) {
 
 async function sendTurn(message) {
   const status = $("#status");
-  const replyBox = $("#reply");
   const button = $("#composer button");
 
   live.records = [];
   repaint("#diagram", live.records);
-  replyBox.hidden = true;
   button.disabled = true;
   status.textContent = "thinking...";
   showPane("live");
+
+  // Shown before the turn runs, so the composer does not appear to swallow the
+  // message for the several seconds a turn takes. The server is still the one
+  // that decides what the conversation holds -- this line is replaced by the
+  // server's own account of it below.
+  live.exchanges = live.exchanges.concat([{ role: "user", text: message }]);
+  live.traceTurn = null;
+  paintTranscript(true);
 
   try {
     const response = await fetch("/api/turn", {
@@ -471,12 +670,27 @@ async function sendTurn(message) {
 
     for await (const event of readEvents(response)) {
       if (event.kind === "reply") {
-        live.threadId = event.thread_id;
-        replyBox.textContent = event.reply;
-        replyBox.hidden = false;
+        setThread(event.thread_id);
         status.textContent = `${event.requests} requests, ${event.iterations} iterations`;
         // The turn is over, so the frontier is cleared while the counts stay.
         repaint("#diagram", live.records);
+        // Re-read this one conversation rather than appending the reply to the
+        // list locally. The tool lines are the reason: a `tool` trace record
+        // carries the tool's name and whether it worked, never the sentence it
+        // returned, and putting that sentence on the event would be an
+        // event-shape change this phase is explicitly not making. Appending
+        // locally would therefore build a transcript missing exactly the lines
+        // that distinguish this from a chat window, and it would differ from
+        // the same conversation reloaded a second later. One conversation, one
+        // GET, and the server stays the only account of what was said.
+        live.exchanges = await (
+          await fetch(`/api/threads/${encodeURIComponent(event.thread_id)}`)
+        ).json();
+        // Known only here. `turn_id` is not part of checkpointed state, so this
+        // route exists for a reply produced in this session and for no other.
+        live.traceTurn = event.turn_id;
+        paintTranscript(true);
+        loadThreads().catch(() => {});
         continue;
       }
       if (event.kind === "error") {
@@ -545,6 +759,14 @@ async function loadMemory() {
     : '<p class="dim">nothing remembered yet.</p>';
 }
 
+async function showTrace(turnId) {
+  const nested = await (await fetch(`/api/traces/${encodeURIComponent(turnId)}`)).json();
+  const records = flatten(nested);
+  renderTree($("#trace-tree"), records);
+  // The same paint a live turn gets. A finished turn is only a longer list.
+  repaint("#trace-diagram", records);
+}
+
 async function loadTraces() {
   const listing = await (await fetch("/api/traces")).json();
   const list = $("#turn-list");
@@ -557,11 +779,7 @@ async function loadTraces() {
       list
         .querySelectorAll("button")
         .forEach((other) => other.setAttribute("aria-current", String(other === button)));
-      const nested = await (await fetch(`/api/traces/${button.dataset.turn}`)).json();
-      const records = flatten(nested);
-      renderTree($("#trace-tree"), records);
-      // The same paint a live turn gets. A finished turn is only a longer list.
-      repaint("#trace-diagram", records);
+      await showTrace(button.dataset.turn);
     });
   });
 }
@@ -601,6 +819,34 @@ export function mount() {
   // before any turn has run.
   repaint("#diagram", []);
   repaint("#trace-diagram", []);
+
+  $("#new-thread")?.addEventListener("click", startNewThread);
+
+  // Delegated, because the transcript is replaced wholesale on every repaint and
+  // a listener bound to a link would not survive it.
+  $("#transcript")?.addEventListener("click", (event) => {
+    const link = event.target.closest("a.to-trace");
+    if (!link) return;
+    event.preventDefault();
+    showPane("traces");
+    showTrace(link.dataset.turn).catch((error) => {
+      $("#status").textContent = String(error);
+    });
+  });
+
+  // A reload continues the conversation the URL names. Nothing is created here:
+  // an identifier with no conversation behind it reads as an empty one, which is
+  // what the server says about it too.
+  const opened = threadFromUrl();
+  if (opened) {
+    openThread(opened).catch((error) => {
+      $("#status").textContent = String(error);
+    });
+  } else {
+    setThread(null);
+    paintTranscript();
+    loadThreads().catch(() => {});
+  }
 
   $("#composer").addEventListener("submit", (event) => {
     event.preventDefault();

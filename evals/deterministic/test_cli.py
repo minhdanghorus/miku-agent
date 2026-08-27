@@ -6,6 +6,7 @@ import builtins
 
 import pytest
 
+from miku.gateway import cli
 from miku.gateway.cli import (
     main,
     new_thread_id,
@@ -358,3 +359,93 @@ def test_a_merge_still_reports_its_text(capsys):
         _result(applicable=[Operation(kind="merge", stale=[1, 2], fact="the merged sentence")])
     )
     assert "the merged sentence" in capsys.readouterr().out
+
+
+# --- the threads subcommand -------------------------------------------------
+
+
+def _view(thread_id: str, title: str, count: int, when: str):
+    from miku.runtime.inspect import ThreadView
+
+    return ThreadView(
+        thread_id=thread_id, title=title, message_count=count, updated_at=when
+    )
+
+
+def test_listing_conversations_takes_a_subcommand():
+    assert cli.parse_args(["threads"]).command == "threads"
+
+
+def test_the_listing_carries_what_you_need_to_act_on_it(capsys):
+    """The identifier is what `--thread` takes, so a listing without it is a
+    listing you cannot act on. The count is what resuming costs."""
+    cli.print_thread_listing(
+        [
+            _view("anime", "Beside Naruto, I also like Detective Conan", 6, "2026-08-27T09:05"),
+            _view("work", "book tennis saturday", 2, "2026-08-26T11:00"),
+        ]
+    )
+    printed = capsys.readouterr().out
+
+    assert "anime" in printed and "work" in printed
+    assert "6 msgs" in printed and "2 msgs" in printed
+    assert "Beside Naruto" in printed
+    # Newest first, as the surface reports them -- the ordering is not redone
+    # here, and this is what says so.
+    assert printed.index("anime") < printed.index("work")
+
+
+def test_a_conversation_with_no_title_is_still_listed(capsys):
+    cli.print_thread_listing([_view("blank", "", 0, "2026-08-27T09:05")])
+    printed = capsys.readouterr().out
+
+    assert "blank" in printed
+
+
+def test_no_conversations_is_a_sentence(capsys):
+    cli.print_thread_listing([])
+    printed = capsys.readouterr().out
+
+    assert "no conversations" in printed
+
+
+def test_every_line_of_the_listing_is_ascii(capsys):
+    """Windows consoles mangle the rest, which is why this repo's terminal
+    output has been ASCII since Phase 1."""
+    cli.print_thread_listing(
+        [_view("anime", "Beside Naruto -- and Detective Conan", 6, "2026-08-27T09:05")]
+    )
+    printed = capsys.readouterr().out
+
+    assert printed.isascii(), printed
+
+
+def test_the_terminal_queries_no_checkpointer_directly():
+    """It opens a handle -- a listing that demanded provider credentials to print
+    eight identifiers would be charging for a read -- but the reading itself is
+    `inspect.thread_list`, the same call the web gateway makes.
+
+    That is the second time the peer-gateway constraint has paid out, and it
+    only holds while nothing here starts querying on its own.
+    """
+    import io
+    import pathlib as stdlib_pathlib
+    import tokenize
+
+    source = stdlib_pathlib.Path(cli.__file__).read_text(encoding="utf-8")
+    code = " ".join(
+        token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type not in (tokenize.COMMENT, tokenize.STRING)
+    )
+
+    for forbidden in ("alist", "aget_tuple", "adelete_thread", "aput"):
+        assert forbidden not in code, f"the terminal must not call {forbidden}"
+
+
+def test_the_terminal_offers_no_way_to_remove_a_conversation():
+    """The listing is what the two gateways share; the write is not. A
+    destructive terminal flag deserves its own argument rather than a ride on a
+    read that was added for free."""
+    with pytest.raises(SystemExit):
+        cli.parse_args(["threads", "--remove", "anime"])

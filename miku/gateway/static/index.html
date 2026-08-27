@@ -13,16 +13,6 @@
       <p class="dim" id="status">idle</p>
     </header>
 
-    <form id="composer" autocomplete="off">
-      <input
-        id="message"
-        type="text"
-        placeholder="ask Miku something, and watch the turn"
-        aria-label="message"
-      />
-      <button type="submit">send</button>
-    </form>
-
     <nav class="tabs" role="tablist">
       <button class="tab" data-pane="live" role="tab" aria-selected="true">live turn</button>
       <button class="tab" data-pane="traces" role="tab" aria-selected="false">traces</button>
@@ -31,25 +21,50 @@
       <button class="tab" data-pane="memory" role="tab" aria-selected="false">memory</button>
     </nav>
 
-    <main>
-      <section id="pane-live" class="pane" data-pane="live">
-        <div id="diagram" class="diagram"></div>
-        <div id="reply" class="reply" hidden></div>
-        <div id="live-tree" class="tree"><p class="dim">no turn yet.</p></div>
-      </section>
-
-      <section id="pane-traces" class="pane" data-pane="traces" hidden>
-        <div id="trace-diagram" class="diagram"></div>
-        <div class="split">
-          <ul id="turn-list" class="turns"></ul>
-          <div id="trace-tree" class="tree"><p class="dim">pick a turn.</p></div>
+    <div class="workspace">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <h2>conversations</h2>
+          <button type="button" id="new-thread">+ new</button>
         </div>
-      </section>
+        <ul id="thread-list" class="threads"></ul>
+      </aside>
 
-      <section id="pane-config" class="pane" data-pane="config" hidden></section>
-      <section id="pane-tools" class="pane" data-pane="tools" hidden></section>
-      <section id="pane-memory" class="pane" data-pane="memory" hidden></section>
-    </main>
+      <main>
+        <section id="pane-live" class="pane" data-pane="live">
+          <div id="diagram" class="diagram"></div>
+          <div id="transcript" class="transcript"></div>
+
+          <!-- The composer belongs to the conversation, so it lives inside the
+               pane that shows one. Sending already switches to this pane, which
+               is what makes that honest rather than a loss: there was never a
+               turn you could start while looking at something else. -->
+          <form id="composer" autocomplete="off">
+            <input
+              id="message"
+              type="text"
+              placeholder="ask Miku something, and watch the turn"
+              aria-label="message"
+            />
+            <button type="submit">send</button>
+          </form>
+
+          <div id="live-tree" class="tree"><p class="dim">no turn yet.</p></div>
+        </section>
+
+        <section id="pane-traces" class="pane" data-pane="traces" hidden>
+          <div id="trace-diagram" class="diagram"></div>
+          <div class="split">
+            <ul id="turn-list" class="turns"></ul>
+            <div id="trace-tree" class="tree"><p class="dim">pick a turn.</p></div>
+          </div>
+        </section>
+
+        <section id="pane-config" class="pane" data-pane="config" hidden></section>
+        <section id="pane-tools" class="pane" data-pane="tools" hidden></section>
+        <section id="pane-memory" class="pane" data-pane="memory" hidden></section>
+      </main>
+    </div>
 
     <script type="module" src="./app.js"></script>
   </body>

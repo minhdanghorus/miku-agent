@@ -24,7 +24,9 @@ considered and rejected there for stated reasons.
 - `miku/gateway/web.py` — the cockpit's server, a **peer** of the terminal and not a
   subcommand of it. No import edge either way. `POST /api/turn` streams a turn as SSE by
   bridging the same `on_event` seam into an `asyncio.Queue`; the read endpoints call
-  `inspect.py` and never the store. `miku/gateway/static/` is the frontend: hand-written
+  `inspect.py` and never the store or the checkpointer. `GET /api/threads` and
+  `/api/threads/{id}` serve the conversation screen; `DELETE /api/threads/{id}` is the one
+  write here besides a turn, and it goes through `Session` exactly as a turn does. `miku/gateway/static/` is the frontend: hand-written
   HTML/CSS/ES-modules, no build step. `app.js` also holds `TOPOLOGY` — the agent's
   architecture, written by hand because the compiled graph cannot report what happens
   *inside* a node — `paint`, a pure function of `(topology, records)`, and `frontier`,
@@ -32,8 +34,12 @@ considered and rejected there for stated reasons.
   not. A test compares the node names `TOPOLOGY` accounts for against the ones the builders
   register -- including names it accounts for without drawing.
 - `miku/runtime/inspect.py` — the read-only view every gateway renders (config, tools,
-  memory, traces). Read-only and environment-free by construction, both pinned by tests. It
-  exists so that a memory tab does not make a gateway a place memory is read.
+  memory, traces, conversations). Read-only and environment-free by construction, both
+  pinned by tests. It exists so that a memory tab does not make a gateway a place memory is
+  read. `thread_list` groups every checkpoint by `thread_id` — `alist(None)` yields
+  checkpoints, not threads — and `conversation_view` filters stored messages into
+  `{role, text}`: the empty `AIMessage` carrying a tool call is dropped, and `ToolMessage`s
+  are kept as their own role because this project's tools return prose.
 - `miku/runtime/config.py` — every knob, `MIKU_`-prefixed. **Nothing else reads the
   environment**, except `providers.py` reading the provider key.
 - `miku/runtime/providers.py` — the provider adapter. Roles
@@ -42,7 +48,10 @@ considered and rejected there for stated reasons.
   `judge_model()` for pydantic-evals.
 - `miku/runtime/session.py` — one session: store + checkpointer + tools + model + tracer +
   compiled graph. Nothing is a module-level global; the eval suite runs many sessions per
-  process.
+  process. `checkpointer`, `tools` and `store` are named accessors — Phase 3d spent the reach
+  measurement Phase 3b recorded rather than letting it drift to three. `delete_conversation`
+  is the only write besides `run_turn`, and has the same shape: a gateway calls, the session
+  writes.
 - `miku/graph/build.py` — the loop, wired by hand. `miku/graph/nodes.py` — the three nodes,
   plus `Deps` (session-lived) and `TurnContext` (turn-lived, delivered as `Runtime.context`).
 - `miku/graph/fanout.py` — the best-of-N subgraph: `plan_angles` -> `Send` x N -> `generate`
@@ -84,6 +93,7 @@ uv run pytest              # the whole suite
 uv run pytest -k live      # only the cases that call the real provider (judged cases included)
 uv run pytest evals/deterministic/test_fanout.py   # fan-out shape, no credentials
 uv run pytest evals/deterministic/test_web.py      # the web gateway, in-process, no port
+uv run miku threads                # list held conversations (no credentials needed)
 uv run miku consolidate            # show what tidying memory would do (writes nothing)
 uv run miku consolidate --apply    # actually resolve them
 uv run ruff check .        # lint (must be clean)
@@ -132,10 +142,17 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
   node decides which tool to use.
 - **A gateway moves data; it never reads a source directly.** The rule the CLI has always
   followed, restated now that a second gateway exists and needs to *display* things the CLI
-  never did. Reads go through `runtime/inspect.py`, which is read-only and takes `Settings`
-  and a store handle rather than resolving either itself. The tempting alternative — let the
-  web gateway query the store and reword the constraint to "no memory reads on the turn
-  path" — was rejected because the reading already has two plausible consumers.
+  never did. Reads go through `runtime/inspect.py`, which is read-only and takes `Settings`,
+  a store handle and a checkpointer handle rather than resolving any of them itself. The
+  tempting alternative — let the web gateway query the store and reword the constraint to "no
+  memory reads on the turn path" — was rejected because the reading already has two plausible
+  consumers. It had two again in Phase 3d, and the second one, `miku threads`, cost a
+  subcommand.
+- **A gateway may cause a write, but only by calling the session.** `run_turn` has worked
+  this way since Phase 1 and `delete_conversation` works the same way. The rule above is
+  about *reading a source*, which a session call does not touch — so removal does not need a
+  write surface beside `inspect.py`, and must not get one. `inspect.py` may read checkpointed
+  state; it may not modify it.
 - **Gateways are peers and must not import each other.** `miku` and `miku-web` are separate
   console scripts over one `open_session`. A test asserts the import edge stays absent,
   because the moment one gateway imports the other, "add a third" stops being cheap.
@@ -250,8 +267,50 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 - Replay is unbuilt. `paint` is pure so a time-scrubbed replay is
   `paint(topology, records.filter(r => r.ts <= t))` plus a slider — but no slider exists and
   nothing tests one.
-- No conversation screen. The cockpit watches turns; it does not list past ones or let you
-  resume them from the browser. `thread_id` is already the key that view needs, so waiting
-  costs nothing.
+- Listing conversations scans every checkpoint. Measured: 272 checkpoint tuples produce 15
+  entries, roughly 18:1, over a 2.5MB database — instant today. Recorded with the ratio
+  rather than indexed, because an index would be the first schema this project adds on top
+  of the checkpointer's own. The number is here so the phase that has to care can tell
+  whether it moved.
+- Conversation history is unbounded and re-sent in full every turn. `nodes.py:187` is
+  `[SystemMessage(...), *state["messages"]]`, and grepping `miku/` for `trim_messages`,
+  `RemoveMessage` or any summarisation finds nothing. Combined with the standing absence of
+  prompt caching, the cost of a conversation grows quadratically in its length; one existing
+  thread is already 19 messages. Phase 3d did not cause this — it made it *reachable*, since
+  a sidebar of resumable conversations encourages exactly what the terminal discouraged — so
+  the message count is shown in both gateways. Trimming is a decision about what the agent
+  remembers within a conversation, which is behaviour, and deciding it inside a UI change is
+  how a memory policy gets chosen by accident.
+- A reply links to its trace only when the turn ran in this browser session. `turn_id` is
+  reported by `TurnResult` and is not in checkpointed state, so a conversation read back from
+  storage carries no route to its turns. Reconciling the two stores to recover the link was
+  rejected: trace files are per-day gitignored scratch with a different lifetime, and the
+  join would break silently whenever one was cleaned up.
+- Removing a conversation reaches thread state and nothing else. Three stores hold what a
+  person would call "this conversation", keyed three ways: the checkpointer by `thread_id`,
+  the fact store by **user** via `facts_namespace(settings)`, and trace files by `turn_id` —
+  a trace line carries no `thread_id` at all, verified. So a fact remembered during a removed
+  conversation survives, and Miku still knows it. The interface names all three outcomes in
+  its confirmation, and a case asserts the fact survives rather than trusting the copy.
+  Making removal complete would mean a `thread_id` -> `turn_id` link that does not exist plus
+  per-thread fact ownership, which is a memory data-model change hiding inside a delete
+  button.
+- Removal is irreversible and has no undo. `adelete_thread` has no soft mode, and a trash
+  tier is a data-model decision. The confirmation says so.
+- The live transcript re-reads its conversation after each turn rather than appending the
+  reply locally. Deliberate, and a deviation from the plan: a `tool` trace record carries the
+  tool's name and whether it worked, never the sentence it returned, so a locally appended
+  transcript would be missing exactly the tool lines that distinguish this from a chat
+  window. Putting that sentence on the event would be an event-shape change this phase does
+  not make. One conversation, one GET, and the server stays the only account of what was said.
+- The terminal lists conversations but cannot remove one. The listing is what the two
+  gateways share; the write is not, and a destructive flag deserves its own argument rather
+  than a ride on a read that came for free.
+- Renaming a conversation is unbuilt. A title is derived from the first user message at read
+  time; storing one would falsify `checkpointer.py`'s standing claim that a conversation list
+  needs no new data model.
 - The web gateway binds loopback, has no authentication, and serves one local user. It is
-  not built to be exposed and should not be.
+  not built to be exposed and should not be — and that got sharper in Phase 3d, not softer.
+  The cockpit now holds every conversation this agent has ever had, serves them to anyone who
+  can reach the port, and offers an irreversible button next to each one. Nothing about the
+  transport changed; what is behind it did.

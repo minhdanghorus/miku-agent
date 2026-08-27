@@ -266,6 +266,227 @@ async def test_an_unknown_turn_reads_back_empty_rather_than_failing(settings):
     assert response.json() == []
 
 
+# --- Conversations -----------------------------------------------------------
+
+
+def remembering_model() -> StubModel:
+    return StubModel(
+        [
+            wants("remember", {"fact": "Dang likes Detective Conan"}),
+            says("Got it. I've added that to your preferences."),
+        ]
+    )
+
+
+async def test_conversations_are_listed_and_read_back_through_the_endpoints(settings):
+    async with open_session(settings, model=remembering_model(), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            await post_turn(client, "I also like Detective Conan", thread_id="anime")
+
+            listing = (await client.get("/api/threads")).json()
+            transcript = (await client.get("/api/threads/anime")).json()
+
+    assert [thread["thread_id"] for thread in listing] == ["anime"]
+    assert listing[0]["title"] == "I also like Detective Conan"
+    # The filtering, through the endpoint rather than only under the surface:
+    # user, the tool's own sentence, then the reply -- and no empty assistant
+    # line for the stored `AIMessage` that carried the call.
+    assert [entry["role"] for entry in transcript] == ["user", "tool", "assistant"]
+    assert all(entry["text"] for entry in transcript)
+
+
+async def test_an_unknown_conversation_is_served_as_empty(settings):
+    async with open_session(settings, model=booking_model(), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            response = await client.get("/api/threads/no-such-conversation")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+async def test_two_turns_on_one_thread_read_back_as_four_exchanges_in_order(settings):
+    """Continuing a conversation needs no new request shape.
+
+    `POST /api/turn` already took a thread identifier before this phase, which
+    is what a correctly placed seam looks like: the conversation screen is a
+    read path, not a change to how a turn is started.
+    """
+    model = StubModel([says("first reply"), says("second reply")])
+    async with open_session(settings, model=model, clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            await post_turn(client, "first", thread_id="ongoing")
+            await post_turn(client, "second", thread_id="ongoing")
+            transcript = (await client.get("/api/threads/ongoing")).json()
+
+    assert [entry["text"] for entry in transcript] == [
+        "first",
+        "first reply",
+        "second",
+        "second reply",
+    ]
+
+
+# --- Removing a conversation --------------------------------------------------
+
+
+async def test_a_removed_conversation_leaves_the_listing_and_reads_back_empty(settings):
+    async with open_session(settings, model=StubModel([says("hi")]), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            await post_turn(client, "hello", thread_id="doomed")
+            removal = await client.delete("/api/threads/doomed")
+
+            listing = (await client.get("/api/threads")).json()
+            transcript = (await client.get("/api/threads/doomed")).json()
+
+    assert removal.status_code == 200
+    assert listing == []
+    assert transcript == []
+
+
+async def test_removing_one_conversation_leaves_every_other_one_intact(settings):
+    model = StubModel([says("a"), says("b")])
+    async with open_session(settings, model=model, clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            await post_turn(client, "keep me", thread_id="kept")
+            await post_turn(client, "not me", thread_id="dropped")
+            await client.delete("/api/threads/dropped")
+
+            listing = (await client.get("/api/threads")).json()
+            kept = (await client.get("/api/threads/kept")).json()
+
+    assert [thread["thread_id"] for thread in listing] == ["kept"]
+    assert [entry["text"] for entry in kept] == ["keep me", "a"]
+
+
+async def test_a_fact_remembered_during_a_removed_conversation_is_still_live(settings):
+    """The asymmetry the interface's wording exists for, asserted rather than trusted.
+
+    Facts are namespaced by user, not by thread, so nothing about a conversation
+    identifier reaches them. The confirmation in the cockpit says so -- and copy
+    drifts, while this does not. If someone ever re-namespaces the store per
+    thread, this case turns red and the sentence stops being a lie in advance.
+    """
+    async with open_session(settings, model=remembering_model(), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            await post_turn(client, "I also like Detective Conan", thread_id="anime")
+            await client.delete("/api/threads/anime")
+
+            memory = (await client.get("/api/memory")).json()
+
+    assert [fact["fact"] for fact in memory] == ["Dang likes Detective Conan"]
+
+
+async def test_a_removed_conversations_turns_are_still_reportable_by_turn_id(settings):
+    """Traces are keyed by turn and carry nothing that names a thread.
+
+    The same missing link the trace routes run into from the other side: there
+    is no route from a conversation to the turns that made it, in either
+    direction.
+    """
+    async with open_session(settings, model=StubModel([says("hi")]), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            events = await post_turn(client, "hello", thread_id="doomed")
+            turn_id = events[-1]["turn_id"]
+            await client.delete("/api/threads/doomed")
+
+            tree = (await client.get(f"/api/traces/{turn_id}")).json()
+
+    assert tree
+
+
+async def test_removing_a_conversation_that_does_not_exist_succeeds(settings):
+    async with open_session(settings, model=StubModel([says("hi")]), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            response = await client.delete("/api/threads/never-existed")
+            listing = (await client.get("/api/threads")).json()
+
+    assert response.status_code == 200
+    assert listing == []
+
+
+async def test_removal_goes_through_the_session_not_the_checkpointer(settings):
+    """The gateway causes a write by calling a session method, exactly as running
+    a turn always has. The rule it must not break is that it reads no source
+    directly, which a session call does not touch."""
+    calls = []
+
+    async with open_session(settings, model=StubModel([says("hi")]), clock=FIXED_CLOCK) as session:
+        original = session.delete_conversation
+
+        async def watched(thread_id):
+            calls.append(thread_id)
+            await original(thread_id)
+
+        session.delete_conversation = watched
+        client = await client_for(session)
+        async with client:
+            await client.delete("/api/threads/whatever")
+
+    assert calls == ["whatever"]
+
+
+async def test_the_terminal_and_the_browser_report_the_same_conversations(settings):
+    """One listing, two gateways. This is the claim the peer-gateway constraint
+    makes, checked rather than assumed -- and the reason `miku threads` cost a
+    subcommand rather than a second implementation."""
+    from miku.runtime.inspect import thread_list
+
+    async with open_session(settings, model=StubModel([says("hi")]), clock=FIXED_CLOCK) as session:
+        client = await client_for(session)
+        async with client:
+            await post_turn(client, "hello", thread_id="shared")
+            served = (await client.get("/api/threads")).json()
+            direct = await thread_list(session.checkpointer)
+
+    assert [thread["thread_id"] for thread in served] == [view.thread_id for view in direct]
+    assert [thread["title"] for thread in served] == [view.title for view in direct]
+    assert [thread["message_count"] for thread in served] == [
+        view.message_count for view in direct
+    ]
+
+
+# --- The handles a gateway is given -------------------------------------------
+
+
+async def test_each_accessor_reports_the_handle_the_session_was_built_with(settings):
+    async with open_session(settings, model=StubModel([says("hi")]), clock=FIXED_CLOCK) as session:
+        assert session.tools is session.deps.tools
+        assert session.store is session.deps.store
+        # The one the session did not hold before this phase. Everything that
+        # reads a conversation goes through it.
+        assert session.checkpointer is not None
+        assert hasattr(session.checkpointer, "alist")
+
+
+def test_the_web_gateway_reaches_for_no_session_internals():
+    """Phase 3b left this reach at two on purpose and recorded the number.
+
+    A conversation screen needed a third handle. Three is where a measurement
+    stops being a measurement and starts being a habit, so the accessors were
+    added and the count is spent -- which only holds if nothing reaches past
+    them afterwards.
+    """
+    import pathlib as stdlib_pathlib
+
+    import miku.gateway.web as web
+
+    source = stdlib_pathlib.Path(web.__file__).read_text(encoding="utf-8")
+    offenders = [
+        line.strip()
+        for line in source.splitlines()
+        if ".deps." in line and not line.strip().startswith("#")
+    ]
+    assert not offenders, offenders
+
+
 # --- The constraint under test ----------------------------------------------
 
 

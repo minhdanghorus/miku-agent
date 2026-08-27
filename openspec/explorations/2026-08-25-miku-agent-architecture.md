@@ -458,7 +458,9 @@ start rather than discovering while writing the first judge eval.
 | 2.5b | Selection: embeddings (`bge-m3`), top-k recall, `miku reindex` + index fingerprint. No gate and no threshold - the pollution spike closed that question |
 | 3a | Judge evals (`LLMJudge`), judging on gemma. Ungated - the judge-strength spike closed it |
 | 3b | UI: the harness cockpit only. FastAPI + uvicorn, static frontend, no build step. Conversation screen deferred |
-| later | OTel spans · other gateways · guardrails · semantic search over memory |
+| 3c | The agent's architecture as a hand-authored diagram, guarded against drift · elapsed offsets on every record |
+| 3d | The conversation screen: `thread_list` + `conversation_view` in `inspect.py`, three `Session` accessors, a sidebar, `thread_id` in the URL, `miku threads`, and removal |
+| later | Token streaming · message trimming · OTel spans · other gateways · guardrails · semantic search over memory |
 
 ### Measured: an unresolved contradiction books the wrong time
 
@@ -941,6 +943,118 @@ records is therefore the duration of something for five of six nodes and of noth
 sixth, with nothing in the record to tell them apart. Offsets from the start are true for all
 six, and a truthful per-node duration was rejected in favour of them: it would need an `ms`
 field on every node event, and a human reading a column of offsets subtracts them unaided.
+
+### Measured: what the checkpointer actually holds (2026-08-27, Phase 3d)
+
+Three probes against the live `.miku/state.db` before the conversation screen was designed.
+Each one changed something, which is the only reason they are recorded.
+
+**One: `alist(None)` yields checkpoints, not threads.**
+
+```
+272 checkpoint tuples  ->  15 threads      (4 to 56 checkpoints per thread)
+```
+
+The first pass of the design assumed one row per conversation. It is roughly 18 to 1, and a
+listing that forwarded the stream would have shown one thread fifty-six times. `thread_list`
+groups explicitly and takes the newest checkpoint per thread; the ordering is computed rather
+than inherited from the stream, which happens to arrive newest-first today. Correct by
+coincidence is not correct.
+
+The scan is recorded rather than indexed. 272 rows over a 2.5MB database is instant, and an
+index would be the first schema this project adds on top of the checkpointer's own. The ratio
+is in CLAUDE.md so the phase that has to care can tell whether the number moved.
+
+**Two: a tool-calling turn stores a message that says nothing.**
+
+```
+HumanMessage  "Beside Naruto, I also like Detective Conan and Dragon Ball"
+AIMessage     content=''   tool_calls=2
+ToolMessage   "Remembered: Dang likes Detective Conan"
+ToolMessage   "Remembered: Dang likes Dragon Ball"
+AIMessage     "Got it. I've added those to your preferences."
+```
+
+Read back verbatim. The empty `AIMessage` is a real stored message carrying the requested
+calls, and rendering it produces a blank bubble corresponding to no moment the user
+experienced — so it is dropped, and a case built on this exact shape asserts that it is.
+
+The `ToolMessage`s go the other way, and that is the discovery rather than the filter. This
+project's tools return *prose*: `"Created: Buy ticket to go home on 2026-08-28 at 15:00"` is
+a sentence, not serialised data. Showing tool activity is therefore a filtering decision and
+not a formatting one — no parsing, no templating, nothing reformatted. Folding those lines
+behind a "2 calls" summary was rejected: Miku says "I've added those to your preferences",
+and the tool line is the evidence that the sentence is more than plausible.
+
+**Three: history is unbounded, and nothing trims it.**
+
+`nodes.py:187` is `[SystemMessage(content=state["system"]), *state["messages"]]`. Grepping
+`miku/` for `trim_messages`, `RemoveMessage` and any summarisation finds nothing. One
+existing thread already holds 19 messages, and there is no prompt caching, so the cost of a
+conversation grows quadratically in its length.
+
+Phase 3d does not cause this and does not fix it. It makes it *reachable*: the terminal
+encouraged fresh threads and a sidebar of resumable conversations encourages the opposite.
+The response is the project's usual one — measure, expose, defer — so both gateways show a
+message count, and trimming stays a decision about what the agent remembers within a
+conversation rather than one taken inside a UI change.
+
+### The three-key asymmetry, and what removal can honestly promise
+
+A sidebar that lists every abandoned thread by its identifier manufactures the clutter it
+then has to offer a way to clear, which is why removal landed in this phase rather than the
+next one. What it can reach was measured, not assumed:
+
+| Store | Keyed by | Removal reaches it |
+|---|---|---|
+| Checkpointer | `thread_id` | **yes** — `adelete_thread(thread_id)`, one call |
+| Store (facts) | the **user**, via `facts_namespace(settings)` | no |
+| Trace files | `turn_id`; a trace line carries no `thread_id` at all | no |
+
+Verified by reading a real trace file: every line carries `turn_id`, `span`, `parent`, `node`
+and `ts`, and nothing that names a thread. This is the same missing link the trace routes run
+into from the other side — there is no route from a conversation to the turns that made it,
+in either direction — surfacing twice in one phase for one reason.
+
+So removal deletes one third of what a person would call "this conversation". A fact
+remembered during it survives, and Miku will still know it. The response is to say so: the
+action is named *remove conversation*, never *delete* and never *forget*, its confirmation
+names all three outcomes, and a case asserts that the fact is still live afterwards rather
+than trusting the copy. Copy drifts; a case does not, and if someone ever re-namespaces the
+store per thread the sentence stops being a lie in advance.
+
+Making removal complete was rejected. It needs a `thread_id` -> `turn_id` link that does not
+exist plus per-thread fact ownership, which is a memory data-model change hiding inside a
+delete button.
+
+### Where the write went, and the mistake that nearly created a module
+
+The first draft of this design deferred removal on the grounds that `inspect.py` is read-only
+and a write "needs a different path". That was wrong, and it is recorded because the mistake
+is the kind that produces an unnecessary module.
+
+Removal does not go through `inspect.py` at all. It goes through the session, in a shape that
+has existed since Phase 1:
+
+    session.run_turn(...)              gateway calls, session writes
+    session.delete_conversation(...)   gateway calls, session writes
+
+The rule a gateway is held to is that it reads no source directly. Calling a session method is
+not reading a source, and causing a write through the session is what running a turn has
+always done.
+
+### The reach measurement, spent
+
+Phase 3b recorded — deliberately, and refused to fix — that the web gateway reached past
+`open_session` twice: `deps.tools` and `deps.store`. The count was the measurement that phase
+existed to take, and Phase 3c protected it by keeping the diagram out of the session.
+
+A conversation screen needs a checkpointer. Reaching for `session.graph.checkpointer` would
+have made it three, which is worse than either number, because three is where a measurement
+stops being a measurement and starts being a habit. All three accessors were added at once —
+adding only `checkpointer` would have left one handle through the door and two through the
+window, which reads to the next person as though the other two were excluded on purpose — and
+a case asserts no `.deps.` reach remains in the gateway.
 
 ## Open questions
 

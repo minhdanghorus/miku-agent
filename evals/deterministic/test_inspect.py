@@ -188,6 +188,157 @@ def test_a_partially_written_trace_file_still_reports_its_records(settings):
     assert len(list(roots[0].walk())) == 2
 
 
+# --- Conversations ----------------------------------------------------------
+
+
+def remembering_model() -> StubModel:
+    """A turn that calls a tool before replying.
+
+    The shape below is not invented. It is what `.miku/state.db` actually holds
+    for a turn like this, read back before any of this was designed: a human
+    message, an `AIMessage` with empty content carrying the call, the
+    `ToolMessage`, then the real reply. Every filtering case here is driven by
+    that shape rather than by a fixture bent to suit the filter.
+    """
+    return StubModel(
+        [
+            wants("remember", {"fact": "Dang likes Detective Conan"}),
+            says("Got it. I've added that to your preferences."),
+        ]
+    )
+
+
+async def test_conversations_are_listed_one_entry_each_not_one_per_checkpoint(settings):
+    """`alist(None)` yields every checkpoint, not one row per thread.
+
+    Measured on the real database at 272 tuples across 15 conversations -- so a
+    listing that forwarded the stream would have shown one conversation
+    fifty-six times. This is the case that would have caught it.
+    """
+    async with open_session(settings, model=remembering_model(), clock=FIXED_CLOCK) as session:
+        await session.run_turn("I also like Detective Conan", thread_id="alpha")
+        views = await runtime_inspect.thread_list(session.checkpointer)
+
+    assert [view.thread_id for view in views] == ["alpha"]
+    # Several checkpoints were written for that one turn.
+    assert views[0].message_count > 1
+
+
+async def test_the_most_recently_active_conversation_is_listed_first(settings):
+    async with open_session(settings, model=StubModel([says("one"), says("two")])) as session:
+        await session.run_turn("first", thread_id="older")
+        await session.run_turn("second", thread_id="newer")
+        views = await runtime_inspect.thread_list(session.checkpointer)
+
+    assert [view.thread_id for view in views] == ["newer", "older"]
+
+
+async def test_a_conversation_is_titled_from_its_opening_message(settings):
+    """Derived at read time, and it does not move when the conversation does.
+
+    No stored field backs it, which is what keeps `checkpointer.py`'s standing
+    claim -- that a conversation list needs no new data model -- true.
+    """
+    async with open_session(settings, model=StubModel([says("a"), says("b")])) as session:
+        await session.run_turn("Beside Naruto, I also like Detective Conan", thread_id="anime")
+        first = await runtime_inspect.thread_list(session.checkpointer)
+        await session.run_turn("and Dragon Ball", thread_id="anime")
+        second = await runtime_inspect.thread_list(session.checkpointer)
+
+    assert first[0].title == "Beside Naruto, I also like Detective Conan"
+    assert second[0].title == first[0].title
+    assert second[0].message_count > first[0].message_count
+
+
+async def test_a_long_opening_message_is_truncated_rather_than_dropped(settings):
+    async with open_session(settings, model=StubModel([says("ok")])) as session:
+        await session.run_turn("word " * 40, thread_id="wordy")
+        views = await runtime_inspect.thread_list(session.checkpointer)
+
+    assert len(views[0].title) == runtime_inspect.TITLE_WIDTH
+    assert views[0].title.endswith("...")
+
+
+async def test_no_conversations_reads_as_empty(settings):
+    async with open_session(settings, model=StubModel([says("hi")])) as session:
+        assert await runtime_inspect.thread_list(session.checkpointer) == []
+
+
+async def test_a_tool_calling_turn_reads_back_without_an_empty_assistant_line(settings):
+    """The filtering, against the stored shape that motivated it.
+
+    The empty `AIMessage` is a real stored message that says nothing -- it
+    carries the requested call -- and rendering it produces a blank bubble
+    corresponding to no moment the user experienced.
+    """
+    async with open_session(settings, model=remembering_model(), clock=FIXED_CLOCK) as session:
+        await session.run_turn("I also like Detective Conan", thread_id="anime")
+        exchanges = await runtime_inspect.conversation_view(session.checkpointer, "anime")
+
+    assert [entry.role for entry in exchanges] == ["user", "tool", "assistant"]
+    assert all(entry.text for entry in exchanges)
+    # The tool's own sentence, unmodified. These tools return prose, which is
+    # why showing tool activity is a filtering decision and not a formatting one.
+    assert exchanges[1].text.startswith("Remembered:")
+
+
+async def test_exchanges_are_reported_in_the_order_they_were_stored(settings):
+    async with open_session(settings, model=StubModel([says("one"), says("two")])) as session:
+        await session.run_turn("first", thread_id="ordered")
+        await session.run_turn("second", thread_id="ordered")
+        exchanges = await runtime_inspect.conversation_view(session.checkpointer, "ordered")
+
+    assert [entry.text for entry in exchanges] == ["first", "one", "second", "two"]
+
+
+async def test_a_conversation_view_exposes_no_persistence_structure(settings):
+    """A transcript reports what was said, not how LangGraph stored it.
+
+    The persisted format belongs to a library and moves on its schedule. A
+    surface that leaked it would bind the browser, the terminal and every case
+    here to that schedule.
+    """
+    async with open_session(settings, model=StubModel([says("hi")])) as session:
+        await session.run_turn("hello", thread_id="plain")
+        exchanges = await runtime_inspect.conversation_view(session.checkpointer, "plain")
+
+    assert {entry.role for entry in exchanges} <= {"user", "assistant", "tool"}
+    for entry in exchanges:
+        fields = set(vars(entry))
+        assert fields == {"role", "text"}, fields
+
+
+async def test_an_unknown_conversation_reads_as_empty_and_creates_nothing(settings):
+    async with open_session(settings, model=StubModel([says("hi")])) as session:
+        assert await runtime_inspect.conversation_view(session.checkpointer, "no-such") == []
+        assert await runtime_inspect.thread_list(session.checkpointer) == []
+
+
+async def test_reading_conversations_writes_no_checkpoint(settings):
+    """Read-only, checked rather than asserted in a docstring.
+
+    Reading thread state is permitted here; writing it is not, which is why
+    removal lives on `Session` and not in this module.
+    """
+    async with open_session(settings, model=StubModel([says("hi")])) as session:
+        await session.run_turn("hello", thread_id="quiet")
+
+        before = [
+            saved.config["configurable"]["checkpoint_id"]
+            async for saved in session.checkpointer.alist(None)
+        ]
+        for _ in range(3):
+            await runtime_inspect.thread_list(session.checkpointer)
+            await runtime_inspect.conversation_view(session.checkpointer, "quiet")
+            await runtime_inspect.conversation_view(session.checkpointer, "no-such")
+        after = [
+            saved.config["configurable"]["checkpoint_id"]
+            async for saved in session.checkpointer.alist(None)
+        ]
+
+    assert before == after
+
+
 # --- The two rules ----------------------------------------------------------
 
 

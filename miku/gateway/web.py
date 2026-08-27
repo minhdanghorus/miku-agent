@@ -11,6 +11,15 @@ There is deliberately no import edge to `cli.py`. That absence is the
 measurement Phase 3b exists for: Phase 1 shaped the terminal gateway so a second
 gateway would be cheap, and until now nothing had tried to be one.
 
+Handles arrive by name -- `session.tools`, `session.store`, `session.checkpointer`
+-- and no longer by reaching through `session.deps`. Phase 3b left that reach at
+two on purpose, as the price of the phase; a conversation screen needed a third,
+and a count nobody chose is worse than either. The measurement is spent.
+
+Removal is the one write here besides a turn, and it goes the same way a turn
+does: `session.delete_conversation(...)`. The rule this module lives under is
+that it reads no source directly, which calling a session method does not touch.
+
 Progress reaches the browser through the same `on_event` seam the terminal uses.
 The one real mismatch is direction -- `run_turn` pushes synchronously, SSE pulls
 asynchronously -- and an `asyncio.Queue` is the whole adapter:
@@ -188,13 +197,32 @@ def create_app(session: Session | None = None, settings: Settings | None = None)
     @app.get("/api/tools")
     async def tools(request: fastapi.Request):
         session_now = current(request)
-        return [asdict(tool) for tool in introspect.tools_view(session_now.deps.tools)]
+        return [asdict(tool) for tool in introspect.tools_view(session_now.tools)]
 
     @app.get("/api/memory")
     async def memory(request: fastapi.Request):
         session_now = current(request)
-        facts = await introspect.memory_view(session_now.deps.store, session_now.settings)
+        facts = await introspect.memory_view(session_now.store, session_now.settings)
         return [asdict(fact) for fact in facts]
+
+    @app.get("/api/threads")
+    async def threads(request: fastapi.Request):
+        views = await introspect.thread_list(current(request).checkpointer)
+        return [asdict(view) for view in views]
+
+    @app.get("/api/threads/{thread_id}")
+    async def thread(request: fastapi.Request, thread_id: str):
+        exchanges = await introspect.conversation_view(current(request).checkpointer, thread_id)
+        return [asdict(exchange) for exchange in exchanges]
+
+    @app.delete("/api/threads/{thread_id}")
+    async def remove_thread(request: fastapi.Request, thread_id: str):
+        # Through the session, which is where writes have always gone. The
+        # inspection surface is read-only and this is not routed through it.
+        # Removing a conversation that is not there succeeds: absence is the
+        # state the caller asked for.
+        await current(request).delete_conversation(thread_id)
+        return {"removed": thread_id}
 
     @app.get("/api/traces")
     async def traces(request: fastapi.Request, day: str | None = None):

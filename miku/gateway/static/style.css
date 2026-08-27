@@ -54,10 +54,21 @@ h1 {
   color: var(--dim);
 }
 
+/* Sticky to the foot of the view rather than to the foot of the document. A
+   transcript grows and a fan-out turn writes about fourteen trace rows beneath
+   it, so a composer that simply sat last would be a composer you scroll to
+   reach. It keeps the page's own background so the tree passes behind it
+   rather than through it. */
 #composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   gap: 0.5rem;
-  margin: 1rem 0;
+  padding: 0.75rem 0;
+  margin-bottom: 0.5rem;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
 }
 
 #message {
@@ -96,6 +107,8 @@ button[disabled] {
 .tabs {
   display: flex;
   gap: 0.25rem;
+  /* The composer used to sit here and carried this gap with it. */
+  margin-top: 1rem;
   border-bottom: 1px solid var(--line);
 }
 
@@ -123,6 +136,197 @@ button[disabled] {
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
   white-space: pre-wrap;
+}
+
+/* --- conversations -------------------------------------------------------- */
+
+/* A sidebar rather than a sixth tab. The tab strip is already five wide, and a
+   conversation list is not one view among five -- it is what the other five are
+   about. */
+.workspace {
+  display: grid;
+  grid-template-columns: 17rem minmax(0, 1fr);
+  gap: 1.5rem;
+  align-items: start;
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  padding-right: 1rem;
+  padding-top: 1rem;
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.sidebar-head h2 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 0 0 0.75rem;
+}
+
+#new-thread {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+}
+
+/* The list scrolls itself rather than stretching the page. Fifteen
+   conversations exist today and the number only goes up, so the sidebar's
+   height has to be a property of the window and not of the database. */
+.threads {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 80vh;
+  overflow-y: auto;
+  /* Room for the scrollbar so the remove button never sits underneath it. */
+  padding-right: 0.25rem;
+}
+
+.thread {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  margin-bottom: 0.2rem;
+}
+
+.thread .open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  background: none;
+  border: 1px solid transparent;
+  border-left: 2px solid transparent;
+}
+
+.thread .open:hover {
+  border-color: var(--line);
+  border-left-color: var(--line);
+}
+
+.thread[aria-current="true"] .open {
+  background: var(--panel);
+  border-left-color: var(--accent);
+}
+
+.thread[aria-current="true"] .thread-title {
+  color: var(--accent);
+}
+
+.thread-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The identifier is what `miku --thread` takes, and the count is what resuming
+   costs: every stored message is re-sent on every turn. Both are quiet, and
+   both are there on purpose. */
+.thread-meta {
+  font-size: 0.74rem;
+  color: var(--dim);
+}
+
+.thread .remove {
+  align-self: stretch;
+  padding: 0 0.5rem;
+  color: var(--dim);
+  background: none;
+  border: 1px solid transparent;
+}
+
+.thread .remove:hover {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+/* --- the transcript ------------------------------------------------------- */
+
+/* Capped, and scrolling inside itself.
+   Without this the conversation set the height of everything: a long thread
+   pushed the composer, the event tree and the whole page down with it, so the
+   more you had said the further you had to travel to say the next thing. The
+   diagram stays put, the composer stays put, and the part that grows is the
+   only part that moves. */
+.transcript {
+  max-height: 46vh;
+  overflow-y: auto;
+  margin-bottom: 0.5rem;
+  padding-right: 0.25rem;
+}
+
+.transcript-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Text as text. Markdown would need a library, which would need a build step or
+   a CDN, and two existing cases forbid both. Newlines are the ninety percent
+   case. */
+.said {
+  white-space: pre-wrap;
+  padding: 0.55rem 0.9rem;
+  margin-bottom: 0.4rem;
+  background: var(--panel);
+  border-left: 2px solid var(--line);
+}
+
+.said .who {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-bottom: 0.2rem;
+}
+
+.said.assistant {
+  border-left-color: var(--accent);
+}
+
+.said.assistant .who {
+  color: var(--accent);
+}
+
+/* Tool activity is a quiet line between bubbles, never folded away. The
+   sentence a tool returned is the evidence that "I've added those to your
+   preferences" is more than plausible; hiding it would leave a transcript that
+   says Miku replied and not that she did anything. */
+.said.tool {
+  background: none;
+  border-left: 1px dashed var(--line);
+  color: var(--dim);
+  font-size: 0.85rem;
+  padding: 0.15rem 0.9rem;
+  margin-bottom: 0.4rem;
+}
+
+.said.tool .who {
+  display: inline;
+  margin-right: 0.6rem;
+  color: var(--branch);
+}
+
+.to-trace {
+  color: var(--dim);
+  font-size: 0.78rem;
+  margin-left: 0.5rem;
+}
+
+.to-trace:hover {
+  color: var(--accent);
 }
 
 /* --- the diagram --------------------------------------------------------- */
@@ -298,6 +502,30 @@ button[disabled] {
 
 /* Narrow windows get the stack back. Same markup, one rule. */
 @media (max-width: 48rem) {
+  /* The sidebar goes above the panes rather than beside them, at the width the
+     diagram already reflows at. One breakpoint, not two. */
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding-right: 0;
+    padding-bottom: 1rem;
+  }
+
+  /* Stacked above the panes here rather than beside them, so half the viewport
+     would be half the screen. Both regions give most of it back to the
+     conversation. */
+  .threads {
+    max-height: 12rem;
+  }
+
+  .transcript {
+    max-height: 55vh;
+  }
+
   .flow {
     flex-direction: column;
     align-items: flex-start;
