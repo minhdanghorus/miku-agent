@@ -904,6 +904,26 @@ def test_a_tool_calling_turn_renders_its_tool_lines_and_no_empty_bubble():
 
 
 @needs_node
+def test_the_transcript_names_who_is_speaking_rather_than_the_stored_role():
+    """`assistant` is the server's word for a row, not a name a person reads.
+
+    The role itself has to stay put -- it is the CSS hook and what every other
+    case asserts on -- so this checks that the two came apart rather than that
+    one was renamed.
+    """
+    shape = run_node(
+        "import { renderTranscript } from './app.js';"
+        f"const html = renderTranscript({json.dumps(CONVERSATION)});"
+        "console.log(JSON.stringify({"
+        "  named: html.includes('>Miku<'),"
+        "  roleKept: html.includes('class=\"said assistant\"'),"
+        "  roleShown: html.includes('>assistant<')}));"
+    )
+
+    assert shape == {"named": True, "roleKept": True, "roleShown": False}
+
+
+@needs_node
 def test_a_trace_route_is_offered_only_where_a_turn_is_known():
     """`turn_id` is reported when a turn runs and is not in checkpointed state.
 

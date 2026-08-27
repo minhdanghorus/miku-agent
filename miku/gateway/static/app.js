@@ -432,6 +432,12 @@ function link(conditional, when) {
 // a route to its trace, and is passed only for a reply produced in this session:
 // `turn_id` is not in checkpointed state, so a conversation read back from
 // storage has none, and a missing affordance beats a broken one.
+// What each role is called on screen. The role itself stays `assistant` -- it is
+// the server's word, the CSS hook and what the cases assert on -- because the
+// name of who is speaking is a display decision and the shape of the data is
+// not. Conflating them is how a persona rename becomes an API change.
+const SPEAKER = { user: "USER", assistant: "MIKU", tool: "TOOL" };
+
 export function renderTranscript(exchanges, traceTurn = null) {
   if (!exchanges.length) {
     // An empty screen is an invitation, and the thing it invites is directly
@@ -444,14 +450,15 @@ export function renderTranscript(exchanges, traceTurn = null) {
   const lines = exchanges.map((entry, index) => {
     const text = escape(entry.text ?? "");
     if (entry.role === "tool") {
-      return `<li class="said tool"><span class="who">tool</span>${text}</li>`;
+      return `<li class="said tool"><span class="who">${SPEAKER.tool}</span>${text}</li>`;
     }
     const role = entry.role === "user" ? "user" : "assistant";
+    const who = escape(SPEAKER[role]);
     const link =
       traceTurn && role === "assistant" && index === lastSpoken
         ? ` <a class="to-trace" href="#" data-turn="${escape(traceTurn)}">trace</a>`
         : "";
-    return `<li class="said ${role}"><span class="who">${escape(role)}</span>${text}${link}</li>`;
+    return `<li class="said ${role}"><span class="who">${who}</span>${text}${link}</li>`;
   });
 
   return `<ul class="transcript-lines">${lines.join("")}</ul>`;

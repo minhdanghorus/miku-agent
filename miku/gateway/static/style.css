@@ -283,11 +283,13 @@ button[disabled] {
   border-left: 2px solid var(--line);
 }
 
+/* No `text-transform` here, unlike the sidebar heading. These are names now,
+   and a name is written the way it is written -- "MIKU" is the label of a
+   category, "Miku" is who is speaking. */
 .said .who {
   display: block;
   font-size: 0.72rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.06em;
   color: var(--dim);
   margin-bottom: 0.2rem;
 }
