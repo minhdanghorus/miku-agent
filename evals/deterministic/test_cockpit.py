@@ -914,13 +914,18 @@ def test_the_transcript_names_who_is_speaking_rather_than_the_stored_role():
     shape = run_node(
         "import { renderTranscript } from './app.js';"
         f"const html = renderTranscript({json.dumps(CONVERSATION)});"
+        "const who = html.split('<span class=\"who\">').slice(1)"
+        "  .map(part => part.split('<')[0].toLowerCase());"
         "console.log(JSON.stringify({"
-        "  named: html.includes('>Miku<'),"
-        "  roleKept: html.includes('class=\"said assistant\"'),"
-        "  roleShown: html.includes('>assistant<')}));"
+        "  who,"
+        "  roleKept: html.includes('class=\"said assistant\"')}));"
     )
 
-    assert shape == {"named": True, "roleKept": True, "roleShown": False}
+    # Case-insensitive on purpose. Whether the labels are shouted or written out
+    # is a styling decision and has already been made both ways; what must not
+    # drift is that the assistant is named and the role is not shown.
+    assert shape["who"] == ["user", "tool", "tool", "miku"]
+    assert shape["roleKept"] is True
 
 
 @needs_node
