@@ -28,6 +28,21 @@ uv run miku                  # talk to Miku
 uv run miku --thread work    # resume a named conversation
 ```
 
+### The cockpit (web gateway)
+
+`miku-web` is a peer of the CLI, not a subcommand of it — it needs its own extra:
+
+```bash
+uv sync --extra dev --extra web   # adds fastapi + uvicorn
+uv run miku-web                   # http://127.0.0.1:8765
+```
+
+It watches a turn happen live in the browser instead of the terminal: which node is
+running, which tool it called, and what landed in memory. It reads through the same
+`open_session` entry point as the CLI and shares `.miku/state.db`, so a fact remembered
+in one shows up in the other. It binds to loopback only, has no authentication, and is
+built for one local user — do not expose it.
+
 Try it: *"Remember that I dislike meetings before 9am."* Quit. Start again.
 *"Book a catch-up with Alex on Saturday."* The fact is still there — it lives in
 `.miku/state.db`, which is yours to open.
@@ -85,6 +100,7 @@ machinery — and a plain "book it Saturday at 8am" costs one request instead of
 | Path | What lives there |
 |---|---|
 | `miku/gateway/cli.py` | the terminal. Text in, text out, nothing else |
+| `miku/gateway/web.py` | the cockpit's server — a peer of the CLI, needs `--extra web` |
 | `miku/runtime/config.py` | every knob, read once. Nothing else touches the environment |
 | `miku/runtime/providers.py` | the provider adapter — roles, capability flags, two builders |
 | `miku/runtime/session.py` | one session: store, checkpointer, tools, model, tracer, graph |
@@ -125,9 +141,19 @@ never mean editing a call site.
 | Scope | one `thread_id` | every thread |
 | Written by | the graph, automatically | the `remember` tool, only when asked |
 
-Phase 1 has no retrieval gate and no consolidation: every fact rides along in every turn,
-and nothing is ever rewritten. Fine at tens of facts, wrong at thousands — the gate is the
-first Phase 2 item, and it wants real accumulated data to tune against.
+There is still no retrieval gate: every live fact rides along in every turn, and a stored
+fact's text is never rewritten — resolving one stamps `superseded_at` on the row instead.
+Fine at tens of facts, wrong at thousands.
+
+Consolidation tidies the live set — proposing `supersede` / `duplicate` / `expire` /
+`merge` for a model to review, never deleting or rewriting text itself:
+
+```bash
+uv run miku consolidate            # show what it would do; writes nothing
+uv run miku consolidate --apply    # actually resolve them
+```
+
+It never runs on its own — no threshold, no schedule, no tool. Someone has to type it.
 
 ## Evals
 
@@ -160,10 +186,10 @@ See `.env.example`. The only required value is the provider API key.
 
 ## What is not here yet
 
-No retrieval gate and no fact consolidation — every remembered fact still rides along in
-every turn, which is fine at tens and wrong at thousands (Phase 2.5). No web UI and no
-judge evals (Phase 3). No OTel, no guardrails, no semantic search over memory, no `.ics`
-export.
+No retrieval gate — every remembered fact still rides along in every turn, which is fine
+at tens and wrong at thousands. No OTel, no guardrails, no semantic search over memory,
+no `.ics` export. The cockpit's appearance is unverified by machine; whether the lit state
+reads correctly to a person is unguarded.
 
 No node cache either, and that one is a decision rather than a delay: it was planned for
 Phase 2 and dropped on inspection, because branches are deliberately given different angles,
