@@ -34,6 +34,13 @@ every turn. Trace files SHALL live under the runtime state directory, partitione
 Each event SHALL identify the turn it belongs to, the kind of event, the node involved, and a
 timestamp. Tool events SHALL additionally record the tool name and whether it succeeded.
 
+Timestamps within one turn SHALL be directly comparable and SHALL NOT decrease along a causal
+chain, so that the elapsed position of any event within its turn can be computed by subtraction
+without consulting anything outside the turn. A timestamp SHALL NOT be read as the boundary of a
+step's work: one node records its event before performing its work so that the work it causes has
+a parent to hang under, while the others record theirs after, and nothing in the file distinguishes
+the two.
+
 A tool SHALL be traced twice: once when its invocation is requested, recording the arguments
 it was asked to run with, and once when it has run, recording whether it succeeded. Both
 SHALL be linked to the step that caused them, so that a request and its outcome reconstruct
@@ -50,6 +57,13 @@ event in order to be written.
 
 - **WHEN** two turns have run
 - **THEN** each event can be attributed to exactly one turn by its recorded turn identifier
+
+#### Scenario: Elapsed position within a turn is computable from the file alone
+
+- **WHEN** a turn's events are read back
+- **THEN** subtracting the first event's timestamp from any event's timestamp yields that event's
+  elapsed position within the turn
+- **AND** no event in a causal chain carries a timestamp earlier than the event that caused it
 
 #### Scenario: A requested tool call records its arguments
 

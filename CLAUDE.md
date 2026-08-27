@@ -25,7 +25,12 @@ considered and rejected there for stated reasons.
   subcommand of it. No import edge either way. `POST /api/turn` streams a turn as SSE by
   bridging the same `on_event` seam into an `asyncio.Queue`; the read endpoints call
   `inspect.py` and never the store. `miku/gateway/static/` is the frontend: hand-written
-  HTML/CSS/ES-modules, no build step.
+  HTML/CSS/ES-modules, no build step. `app.js` also holds `TOPOLOGY` — the agent's
+  architecture, written by hand because the compiled graph cannot report what happens
+  *inside* a node — `paint`, a pure function of `(topology, records)`, and `frontier`,
+  which is deliberately not part of it because it depends on arrival order and `paint` must
+  not. A test compares the node names `TOPOLOGY` accounts for against the ones the builders
+  register -- including names it accounts for without drawing.
 - `miku/runtime/inspect.py` — the read-only view every gateway renders (config, tools,
   memory, traces). Read-only and environment-free by construction, both pinned by tests. It
   exists so that a memory tab does not make a gateway a place memory is read.
@@ -208,9 +213,43 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
   accessor for either. Two properties would close it. They were not added, deliberately: the
   count is the measurement Phase 3b existed to take, and hiding it would have wasted the
   phase.
-- The cockpit has never been looked at in a browser. `buildTree` and the renderer are
-  exercised under node — out-of-order branches, orphaned records, escaping — so correctness
-  is covered and *appearance* is not.
+- The cockpit's *appearance* is unverified by machine, and Phase 3c made that the largest
+  such surface in the repo. `buildTree`, `paint`, `elapsed` and the renderers are all
+  exercised under node — out-of-order branches, orphaned records, escaping, arrival-order
+  independence — so correctness is covered. Whether the lit state reads against the unlit
+  one, or the back edge reads as a loop, only a person can say.
+- The diagram's un-derivable half is also its unguarded half. The drift guard compares node
+  names, because node names are derivable. What a box says happens *inside* it — the persona
+  load and the fact recall inside `assemble` — is exactly what `get_graph()` cannot report,
+  which is why it is hand-drawn, which is why nothing checks it. Move `recall_facts` and the
+  diagram goes quietly stale. Bounded by being small and sitting beside a guarded inventory;
+  not solved.
+- The drift guard skips where `node` is absent, like every other frontend case. A guard that
+  runs on the author's machine and skips on a bare CI box beats no guard, and the alternative
+  — a shared JSON topology both sides read — was rejected because the page would then fetch
+  its own topology at load, adding a runtime failure mode to remove a test skip.
+- The cockpit shows when each record happened, never how long a step took. Deliberate: the
+  events do not bracket work (`tools` records before, the rest record after), so a truthful
+  duration would need an `ms` field on every node event. Offsets from the turn's start are
+  true for every row without one. The field is what a later phase adds if something other
+  than a human needs to read the timing.
+- Each box in the diagram declares what its number counts, and they do not count the same
+  thing: `agent` counts laps, `tools` counts tool calls, `assemble` counts nothing. The unit
+  is rendered with the number for exactly that reason. Both rules land on quantities the
+  session computes on its own -- `TurnResult.iterations` and `len(tool_calls)` -- and a case
+  asserts the badges against them, which is the check that a uniform record count could not
+  fail. Whether a box is lit is a separate question from what it counts: a capped turn shows
+  `agent` lit with zero laps.
+- The fan-out subgraph is accounted for but not drawn. Its four node names sit on the `tools`
+  box, so a fan-out drives that count from x1 to x8 rather than lighting a box of its own. A
+  separate box existed for one commit and stopped earning the space once the count carried the
+  same signal; `deferred` in `TOPOLOGY` is the one line that brings it back.
+- The diagram marks how far a turn has got, never what is running. It cannot: `tools` records
+  its event before its work and every other node records after, so the newest record names a
+  started step once and a finished step five times. The mark carries no label for that reason.
+- Replay is unbuilt. `paint` is pure so a time-scrubbed replay is
+  `paint(topology, records.filter(r => r.ts <= t))` plus a slider — but no slider exists and
+  nothing tests one.
 - No conversation screen. The cockpit watches turns; it does not list past ones or let you
   resume them from the browser. `thread_id` is already the key that view needs, so waiting
   costs nothing.

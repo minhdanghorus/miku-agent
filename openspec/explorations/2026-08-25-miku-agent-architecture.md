@@ -880,6 +880,68 @@ renderer are exercised under node — out-of-order branches, an orphaned record,
 which is stronger than eyeballing for correctness, but says nothing about layout, contrast,
 or whether the thing is pleasant to watch.
 
+### Decided: the cockpit diagram is not the LangGraph graph (2026-08-27)
+
+Phase 3c adds a diagram of the agent above the live turn. The first design derived it from
+`compiled.get_graph()`, on the repo's usual reasoning: a hand-drawn picture is a second place
+the architecture is written down, and second places drift. That design was wrong, and the
+reason is worth keeping because it will be proposed again.
+
+**What the compiled graph knows is the execution schedule, not the architecture.** Probed live:
+
+```
+main   nodes: ['__end__', '__start__', 'agent', 'assemble', 'tools']
+fanout nodes: ['__end__', '__start__', 'format', 'generate', 'plan_angles', 'select_best']
+```
+
+Three real nodes in the main graph. What is absent from that list is the point:
+
+- `recall_facts` (`nodes.py:124`) — the "retrieve context" step any reader looks for first,
+  and the one Phase 2.5b will grow into a vector search. It is a line inside `assemble`.
+- `load_persona` — likewise.
+- The entire fan-out, which is behind a tool because `build.py` chose that in its own
+  docstring: *"delegation adds no node and no edge here."*
+
+So a derived diagram would have been unfalsifiable and uninformative at the same time: every
+box correct, and the two things most worth seeing missing. The user put it more directly —
+*"in langgraph, we cannot show the node to 'get the chunk'"* — and was describing something
+already true of this repo today, not a limitation that would arrive later.
+
+**A LangGraph node is not a conceptual step.** That is a design choice this project made
+deliberately and has already defended twice. The diagram has to describe the second thing.
+
+**What replaced the "derive it" safeguard.** Drift is guarded rather than prevented: a test
+compares the node names the hand-authored `TOPOLOGY` claims against the union of
+`build_graph(...).get_graph().nodes` and `build_fanout_graph(...).get_graph().nodes`, minus
+`__start__`/`__end__`, and fails naming the node either side is missing. Seven names, both
+directions, plus a control case proving the comparison can fail.
+
+The guard's boundary is the same boundary seen from the other side: it covers what is
+derivable, and what is *not* derivable — the steps drawn inside a box — is exactly what it
+cannot check. Recorded as a known limit in those words rather than folded into a general
+statement about hand-written docs.
+
+**A side effect worth noting.** Choosing to hand-author removed a blocking spike. The derived
+design needed to establish whether `get_graph()` exposes the `plan_angles -> select_best`
+conditional edge at all — `fanout.py:471` registers both destinations, and the zero-branch
+budget-exhausted path takes the second one, so a flattened conditional would have silently
+hidden a real path. The question stopped mattering the moment the edges stopped being derived.
+
+**It also kept the reach count at two.** An earlier version of this design added a
+`Session.graph` accessor so the gateway could render a derived diagram, which would have made
+the web gateway's reaches past `open_session` three. The diagram is static frontend data now,
+the guard builds its own graph inside the test, and the Phase 3b measurement stands unchanged.
+
+**Timing, in the same phase.** Every trace record has carried a `ts` since Phase 1 and the
+renderer never read it. It does now, as an offset from the turn's first record — never as a
+gap to the preceding one, because the events do not bracket work: `tools` records its event
+*before* its work so the calls it makes have a parent, while `assemble`, `agent`,
+`plan_angles`, `generate` and `select_best` all record theirs *after*. A gap between adjacent
+records is therefore the duration of something for five of six nodes and of nothing for the
+sixth, with nothing in the record to tell them apart. Offsets from the start are true for all
+six, and a truthful per-node duration was rejected in favour of them: it would need an `ms`
+field on every node event, and a human reading a column of offsets subtracts them unaided.
+
 ## Open questions
 
 - ~~The pollution spike~~ **closed 2026-08-26** — measured, see above. No gate in 2.5b. What
