@@ -13,6 +13,12 @@ candidate slots in parallel, each from a different angle, then judges them again
 knows about you. It is `Send`-based map-reduce in a subgraph behind a tool — so the model
 decides to fan out by choosing that tool, and the main loop is still three nodes.
 
+**Phase 3 — the cockpit.** A web gateway that watches a turn happen live: which node is
+running, which tool it called, and what landed in memory — the same graph, a second window
+onto it.
+
+![Miku cockpit showing a live turn: the assemble/agent/tools graph lit up, a reply, and a JSONL-style event trace below it](docs/images/cockpit-demo.png)
+
 ## Quickstart
 
 ```bash
