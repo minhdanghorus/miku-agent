@@ -110,6 +110,11 @@ The fan-out is a subgraph reached through a tool, not a fourth node. That is del
 choosing a tool is already how a model decides things, so "should I fan out?" needs no new
 machinery — and a plain "book it Saturday at 8am" costs one request instead of eight.
 
+[![miku-agent architecture diagram: gateways, session, graph, memory tiers, and tracing](docs/diagrams/miku-agent-architecture.png)](docs/diagrams/miku-agent-architecture.html)
+
+Open the [interactive diagram](docs/diagrams/miku-agent-architecture.html) for pan/zoom,
+search, dark/light themes, and three guided views — turn path, fan-out, and memory tiers.
+
 | Path | What lives there |
 |---|---|
 | `miku/gateway/cli.py` | the terminal. Text in, text out, nothing else |
