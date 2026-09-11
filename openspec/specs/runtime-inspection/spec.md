@@ -2,7 +2,8 @@
 
 ## Purpose
 
-A read-only view of what the runtime is currently configured to do, what tools it has, what
+A read-only view of what the runtime is currently configured to do, what tools it has and where
+each came from, which external tool servers are configured and how they fared, what
 long-term memory holds, which conversations it is holding, what one of them contains, and
 what a past turn did.
 
@@ -20,7 +21,8 @@ conversation view does; changing it is what belongs on the session instead.
 ### Requirement: A read-only view of runtime state is available to any gateway
 
 The system SHALL provide a runtime surface that reports what is currently configured, which
-tools exist, what long-term memory holds, which conversations are held, what one conversation
+tools exist and where each came from, which external tool servers are configured and how they
+fared, what long-term memory holds, which conversations are held, what one conversation
 contains, and what a past turn did. Every gateway SHALL obtain such data from this surface rather
 than reading those sources itself.
 
@@ -34,6 +36,25 @@ than reading those sources itself.
 
 - **WHEN** the inspection surface is asked which tools exist
 - **THEN** it reports every registered tool by name, with the description the model is given
+
+#### Scenario: A tool reports where it came from
+
+- **WHEN** the inspection surface reports the registered tools
+- **THEN** each one is reported as built into this system or as contributed by a named external
+  server
+- **AND** a tool contributed by a server names that server
+
+#### Scenario: External tool servers are reportable
+
+- **WHEN** the inspection surface is asked which external tool servers are configured
+- **THEN** it reports each configured server, whether it is enabled, whether it connected, how
+  many tools it contributed, and the reason if it did not connect
+
+#### Scenario: Reporting servers starts nothing
+
+- **WHEN** the inspection surface is asked about external tool servers
+- **THEN** no server process is started in order to answer
+- **AND** configured state is reported even for servers that were never connected
 
 #### Scenario: Live facts are reportable
 
@@ -107,3 +128,21 @@ data. It SHALL NOT raise, and it SHALL NOT require a gateway to distinguish "emp
 
 - **WHEN** a trace file contains a line that is not valid JSON
 - **THEN** the remaining records are still reported
+
+### Requirement: Inspection never starts a process
+
+Inspection SHALL NOT start, spawn, or connect to anything in order to answer a question. The
+surface is safe to call at any moment, including during a turn, and a function that could launch a
+browser to render a page is not.
+
+Where a report has both a configured half and a live half, the configured half SHALL be derived
+from configuration and the live half SHALL be taken from a session that already holds it. An
+absent session SHALL yield the configured half with the live half reported as unknown, never an
+error and never an attempt to obtain it.
+
+#### Scenario: Server state is reportable with no session
+
+- **WHEN** the inspection surface is asked about external tool servers and no session exists
+- **THEN** it reports what is configured
+- **AND** reports connection state as unknown rather than connecting to find out
+- **AND** starts no process
