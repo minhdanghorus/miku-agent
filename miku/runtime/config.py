@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
@@ -56,8 +56,45 @@ class Settings(BaseSettings):
     # Where state.db and traces/ live.
     state_dir: Path = Path(".miku")
 
+    # The external-tool connector, off unless both of these agree. The flag is
+    # the brake for a config file that outlives the intention behind it: a
+    # forgotten mcp.json would otherwise spawn processes on every session of a
+    # repo someone came back to after three months.
+    #
+    # These two fields are all of MCP that reaches Settings. A server spec is a
+    # nested thing of variable arity -- command, args, an environment map, a
+    # working directory, a tool allowlist -- and flattening that into
+    # MIKU_MCP_SERVER_0_ARGS_2 produces names nobody can read. The servers live
+    # in a file, and miku/mcp/config.py is what reads it. That is not a hole in
+    # this module's rule, which is about the environment: reading a JSON file is
+    # not reading os.environ.
+    mcp_enabled: bool = False
+
+    # Defaulted into the gitignored state directory rather than the repo root,
+    # because a server description carries the credentials that server starts
+    # with, and the root is where an accidental `git add -f` finds it. The
+    # tracked template is mcp.example.json.
+    #
+    # The literal default is what someone reading this file needs to see, but it
+    # follows state_dir rather than being pinned to it: an eval that redirects
+    # state_dir to a temporary directory would otherwise still be pointed at the
+    # developer's real server list. See _mcp_config_follows_state_dir.
+    mcp_config: Path = Path(".miku/mcp.json")
+
     # Whose facts the long-term store holds (its namespace).
     user_id: str = "local"
+
+    @model_validator(mode="after")
+    def _mcp_config_follows_state_dir(self) -> Settings:
+        """Keep the config file inside the state directory unless asked otherwise.
+
+        Only when `mcp_config` was not set explicitly. Someone who names a path
+        means that path; someone who moves `state_dir` means the file moved with
+        it, which is what every other thing in that directory does.
+        """
+        if "mcp_config" not in self.model_fields_set:
+            object.__setattr__(self, "mcp_config", self.state_dir / "mcp.json")
+        return self
 
     def model_override(self, role: str) -> str:
         """The configured override for a role, or "" if none."""

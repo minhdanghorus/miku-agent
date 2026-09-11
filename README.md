@@ -188,6 +188,57 @@ runaway-turn case, which must terminate at the iteration cap without spending a 
 Every evaluator asserts on which tool ran and what landed in the database, never on how the
 reply is worded. Small models phrase things differently on every run; stored rows do not.
 
+## External tools (MCP)
+
+Miku has four tools of its own. Anything else that already exists as a Model Context
+Protocol server can be borrowed without writing Python here.
+
+```bash
+uv sync --extra dev --extra mcp
+cp mcp.example.json .miku/mcp.json     # then set MIKU_MCP_ENABLED=true
+uv run miku mcp                        # what connected, and what it contributed
+```
+
+Two gates, and they are AND: the flag **and** the file. Either alone does nothing, and
+enabling the connector with no file is a state rather than an error. The default is off, so
+nothing changes for anyone who does not opt in — including the eval suite, which opens many
+sessions per process and would otherwise spawn a subprocess for each.
+
+```json
+{
+  "servers": [
+    {
+      "name": "chrome",
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"],
+      "tools": ["navigate_page", "take_snapshot", "click"]
+    }
+  ]
+}
+```
+
+`tools` is an allowlist, and leaving it out binds everything the server offers. That is a
+real decision rather than tidiness: `chrome-devtools-mcp` offers 29 tools and Miku has 4, and
+the measurement behind the default model was taken at 4. An allowlist rather than a denylist,
+so a server's next release cannot add tools to the prompt without someone deciding to.
+
+`cwd` is there because a server that lives in its own project, with its own interpreter and
+relative imports, cannot be started from this one's directory. `enabled: false` switches a
+server off without deleting what you wrote down.
+
+Tools arrive namespaced — `chrome_navigate_page` — and the cockpit's tools tab groups them by
+origin. A built-in tool is in this repository; a borrowed one depends on a process that may
+not start tomorrow, and when a tool goes missing that difference is the whole diagnosis.
+
+A server that fails to start costs a warning and its own tools. The session opens, the other
+servers keep theirs, and the built-in four are never at risk. `.miku/mcp.json` is gitignored:
+it holds the credentials the servers are started with. `mcp.example.json` is the tracked
+template, and its first entry points at `evals/fixtures/mcp_echo_server.py` — a server in
+this repo, so the example works on a fresh clone with no npx and no network.
+
+The tool surface only. Resources and prompts are not read, stdio is the only transport
+implemented, and large tool output is not truncated — see the known limits in `CLAUDE.md`.
+
 ## Configuration
 
 See `.env.example`. The only required value is the provider API key.
@@ -201,6 +252,8 @@ See `.env.example`. The only required value is the provider API key.
 | `MIKU_MAX_REQUESTS_PER_TURN` | `24` | model requests per turn, fan-out included |
 | `MIKU_STATE_DIR` | `.miku` | where `state.db` and `traces/` live |
 | `MIKU_USER_ID` | `local` | whose facts the store holds |
+| `MIKU_MCP_ENABLED` | `false` | connect external tool servers (needs the file too) |
+| `MIKU_MCP_CONFIG` | `.miku/mcp.json` | where the server list lives |
 
 ## What is not here yet
 

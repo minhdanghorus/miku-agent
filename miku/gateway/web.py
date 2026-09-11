@@ -199,6 +199,18 @@ def create_app(session: Session | None = None, settings: Settings | None = None)
         session_now = current(request)
         return [asdict(tool) for tool in introspect.tools_view(session_now.tools)]
 
+    @app.get("/api/mcp")
+    async def mcp(request: fastapi.Request):
+        """Configured external tool servers, and how they fared.
+
+        Live state comes from the session, which already holds it. Nothing here
+        reads the configuration file or contacts a server -- rendering a page
+        must not be able to launch a browser.
+        """
+        session_now = current(request)
+        view = introspect.mcp_view(session_now.settings, session_now.mcp.states)
+        return asdict(view)
+
     @app.get("/api/memory")
     async def memory(request: fastapi.Request):
         session_now = current(request)

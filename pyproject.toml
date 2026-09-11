@@ -40,6 +40,17 @@ web = [
     "uvicorn>=0.30",
 ]
 
+# External tool servers, also optional, and off by default twice over (see
+# MIKU_MCP_ENABLED). langchain-mcp-adapters is what translates an MCP tool's
+# JSON Schema into something bind_tools accepts -- which is exactly the line
+# CLAUDE.md draws: LangChain does tool binding, and an MCP tool schema is a wire
+# format. It brings the `mcp` SDK with it, which is also what the test fixture
+# server is written against. Install with:
+#   uv sync --extra dev --extra mcp
+mcp = [
+    "langchain-mcp-adapters>=0.3",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

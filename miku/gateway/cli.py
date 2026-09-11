@@ -43,6 +43,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Actually write. Without it, the plan is printed and nothing changes.",
     )
     commands.add_parser("threads", help="List held conversations.")
+    commands.add_parser("mcp", help="List external tool servers and what they contributed.")
     # Deliberately no removal flag. The listing is what the two gateways share;
     # the write is not, and a destructive terminal flag deserves its own
     # argument rather than a ride on a read.
@@ -201,6 +202,85 @@ async def list_threads() -> int:
         return 0
 
 
+def print_mcp_report(view, tools) -> None:
+    """External tool servers, in ASCII, saying which of three states this is.
+
+    "Nothing is configured", "the connector is off" and "a server is broken" are
+    three different sentences and must not collapse into one shrug. That is the
+    whole reason `MCPView` carries both gates separately instead of one boolean.
+    """
+    if not view.present:
+        print("  no external tool servers are configured.")
+        print(f"  expected at: {view.path}")
+        print("  start from mcp.example.json, then set MIKU_MCP_ENABLED=true.")
+        return
+
+    if not view.enabled:
+        print("  the connector is disabled (MIKU_MCP_ENABLED is not true).")
+        print("  configured servers, none of them contacted:")
+
+    borrowed: dict[str, list[str]] = {}
+    for tool in tools:
+        borrowed.setdefault(tool.source, []).append(tool.name)
+
+    for server in view.servers:
+        if not server.enabled:
+            state = "off"
+        elif server.connected is None:
+            state = "not contacted"
+        elif server.connected:
+            state = f"{server.tool_count} tool" + ("" if server.tool_count == 1 else "s")
+        else:
+            state = "FAILED"
+        print(f"  {server.name:16} {server.transport:8} {state}")
+
+        if server.error:
+            print(f"    reason: {server.error}")
+        for name in borrowed.get(server.name, []):
+            print(f"    - {name}")
+
+    for problem in view.problems:
+        print(f"  ! {problem}")
+
+
+async def show_mcp() -> int:
+    """Report the external tool servers, and what each one contributed.
+
+    Opens the connector rather than a whole session, for the reason
+    `list_threads` opens a checkpointer rather than one: a report that demanded
+    provider credentials to say which servers are configured would be charging
+    for a read. Opening a handle is not reading a source -- the reading is
+    `inspect.mcp_view`, the same call the web gateway makes.
+
+    It does start the servers, which is the only way to say what they offered;
+    `inspect.py` itself starts nothing, which is the rule that matters. They are
+    closed again before this returns.
+
+    One honest gap: collisions are checked against the tools built here, and the
+    delegating `propose_slots` is appended inside `open_session` and so is not
+    among them. A server contriving to collide with that name would be reported
+    when a real session opens and not by this command.
+    """
+    from miku.mcp.client import open_mcp
+    from miku.memory.store import open_store
+    from miku.runtime.inspect import mcp_view, tools_view
+    from miku.tools.registry import build_tools
+
+    settings = load_settings()
+    settings.ensure_dirs()
+
+    async with open_store(settings) as store:
+        native = [tool.name for tool in build_tools(settings, store)]
+        async with open_mcp(settings, native_names=native) as connection:
+            view = mcp_view(settings, connection.states)
+            print(f"miku - {len(view.servers)} external tool server"
+                  + ("" if len(view.servers) == 1 else "s"))
+            print_mcp_report(view, tools_view(connection.tools))
+
+    # Always successful. Nothing configured is a state, not a failure.
+    return 0
+
+
 async def consolidate_memory(apply: bool) -> int:
     """Open the pass, run it once, print what it did. No logic beyond that."""
     from miku.memory.consolidate import open_consolidation
@@ -250,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
             return asyncio.run(consolidate_memory(apply=args.apply))
         if args.command == "threads":
             return asyncio.run(list_threads())
+        if args.command == "mcp":
+            return asyncio.run(show_mcp())
         return asyncio.run(chat(thread_id))
     except ProviderError as error:
         # Configuration is the one failure we want loud and early — but as a
