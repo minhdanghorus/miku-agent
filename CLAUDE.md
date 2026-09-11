@@ -5,10 +5,18 @@ repository.
 
 ## Project state
 
-miku-agent is a local-first personal assistant agent. **Phases 1 and 2 are implemented**: a
-CLI conversation on a hand-built LangGraph `StateGraph`, with scheduling tools, two-tier
-memory, JSONL tracing, a deterministic eval suite, and best-of-N fan-out behind a tool. The
-design constraint is legibility — explicit, readable code over framework indirection.
+miku-agent is a local-first personal assistant agent. **Phases 1 through 4 are
+implemented**: a CLI conversation on a hand-built LangGraph `StateGraph`, with scheduling
+tools, two-tier memory, JSONL tracing, a deterministic eval suite, best-of-N fan-out behind a
+tool, a web cockpit that watches a turn live and holds every conversation, and an MCP
+connector that borrows tools from external servers. The design constraint is legibility —
+explicit, readable code over framework indirection.
+
+The connector is the one part that is off by default, twice over: `MIKU_MCP_ENABLED` **and**
+`.miku/mcp.json` must both be present. Nothing about a default install changed when it
+arrived — no subprocess is spawned, the four built-in tools are what a session binds, and
+`miku/graph/` is byte-identical to its Phase 3 state, asserted by a hash manifest rather than
+by intention.
 
 Planning lives in OpenSpec. Completed changes are under `openspec/changes/archive/`, and the
 architecture reasoning behind every decision — including the live spike and measurement

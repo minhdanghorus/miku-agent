@@ -17,6 +17,13 @@ decides to fan out by choosing that tool, and the main loop is still three nodes
 running, which tool it called, and what landed in memory — the same graph, a second window
 onto it.
 
+**Phase 4 — borrowed tools.** Miku can now connect to Model Context Protocol servers and
+call their tools as if they were its own. A browser driver, an HR database, a stock ledger —
+anything that already speaks MCP is a few lines of JSON rather than a few hundred lines of
+Python in this repo. Off by default and behind two gates, namespaced by server, filtered by
+an allowlist, and a server that will not start costs a warning rather than the session. The
+graph did not change: MCP makes the tool list longer and does nothing else.
+
 ![Miku cockpit showing a live turn: the assemble/agent/tools graph lit up, a reply, and a JSONL-style event trace below it](docs/images/cockpit-demo.png)
 
 ## Quickstart
@@ -27,6 +34,7 @@ cp .env.example .env         # then paste your provider key into it
 uv run miku                  # talk to Miku
 uv run miku --thread work    # resume a named conversation
 uv run miku threads          # list conversations you can resume
+uv run miku mcp              # list external tool servers and what each contributed
 ```
 
 ### The cockpit (web gateway)
@@ -267,6 +275,15 @@ whole history is re-sent on every turn, with no summarisation and no prompt cach
 long conversation is an expensive one. The message count beside each conversation is there
 to make that visible. No token-by-token streaming, no renaming a conversation, and no
 search across them.
+
+Borrowed tools reach one third of MCP. Resources and prompts are neither read nor
+registered, stdio is the only transport implemented (`transport` is a field in every server
+spec so that adding another is an addition rather than a migration), non-text results are
+replaced by a placeholder, and a server that dies mid-session is not reconnected. Large tool
+output is not truncated either — a page's whole accessibility tree goes into the conversation
+and stays there — which is the same decision message trimming got: what the agent retains
+within a conversation is behaviour, and an infrastructure change is the wrong place to decide
+it. The allowlist is the control, and it is manual.
 
 No node cache either, and that one is a decision rather than a delay: it was planned for
 Phase 2 and dropped on inspection, because branches are deliberately given different angles,
