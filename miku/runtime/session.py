@@ -15,6 +15,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from miku.graph.build import build_graph
 from miku.graph.nodes import Deps, TurnContext
+from miku.mcp.client import MCPConnection, open_mcp
 from miku.memory.checkpointer import open_checkpointer
 from miku.memory.store import open_store
 from miku.ops.tracing import Tracer, new_turn_id
@@ -52,13 +53,22 @@ class TurnResult:
 class Session:
     """Runs turns against one compiled graph."""
 
-    def __init__(self, settings: Settings, graph, deps: Deps, budget: Budget, checkpointer):
+    def __init__(
+        self,
+        settings: Settings,
+        graph,
+        deps: Deps,
+        budget: Budget,
+        checkpointer,
+        mcp: MCPConnection | None = None,
+    ):
         self.settings = settings
         self.graph = graph
         self.deps = deps
         # A template, not a counter: every turn clones its own allowance off it.
         self.budget = budget
         self._checkpointer = checkpointer
+        self._mcp = mcp or MCPConnection()
 
     # The handles a gateway is allowed to want, offered by name.
     #
@@ -82,6 +92,18 @@ class Session:
     @property
     def store(self):
         return self.deps.store
+
+    @property
+    def mcp(self) -> MCPConnection:
+        """How each configured external tool server fared, for `inspect.py`.
+
+        Live state is held here rather than re-derived, because deriving it
+        would mean contacting a server, and the inspection surface is pinned
+        read-only and safe to call in the middle of a turn. A session that
+        connected nothing holds an empty connection, not None -- absence is
+        data here as everywhere else.
+        """
+        return self._mcp
 
     async def delete_conversation(self, thread_id: str) -> None:
         """Remove one conversation's thread state, and nothing else.
@@ -222,10 +244,28 @@ async def open_session(
         # list to the model.
         deps.tools.extend(build_proposal_tools(deps))
 
-        yield Session(
-            settings,
-            build_graph(deps, checkpointer=checkpointer),
-            deps,
-            Budget(limit=settings.max_requests_per_turn),
-            checkpointer,
-        )
+        # External servers, last, and nested rather than opened alongside the
+        # store -- a deviation with a reason. Collision detection needs the
+        # complete native tool list, and the delegating proposal tools cannot
+        # exist before `Deps` does, so the names are not known until here. The
+        # nesting is also the correct unwind order: the child processes die
+        # before the database handles they never touched.
+        #
+        # Still one lifecycle and no new lifecycle object: this closes when
+        # `open_session` closes, for the same reason `open_store` does. Off
+        # unless MIKU_MCP_ENABLED is true and the config file exists, so the
+        # eval suite's many sessions per process spawn nothing.
+        async with open_mcp(settings, native_names=[tool.name for tool in deps.tools]) as mcp:
+            # Before `build_graph`, which is where `bind_tools` is called: a
+            # tool the model has not been told about cannot be requested, which
+            # is the whole argument against connecting lazily.
+            deps.tools.extend(mcp.tools)
+
+            yield Session(
+                settings,
+                build_graph(deps, checkpointer=checkpointer),
+                deps,
+                Budget(limit=settings.max_requests_per_turn),
+                checkpointer,
+                mcp,
+            )

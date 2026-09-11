@@ -1015,3 +1015,74 @@ def test_an_empty_listing_is_a_sentence_not_a_blank_sidebar():
     )
 
     assert "no conversations yet" in shape["html"]
+
+
+# --- Tools, grouped by where they came from ---------------------------------
+
+
+@needs_node
+def test_tools_are_grouped_by_origin():
+    """A built-in tool is in the repository; a contributed one depends on a
+    process that may not start tomorrow. The grouping is that difference."""
+    html = run_node(
+        "import { renderTools } from './app.js';"
+        "const tools = ["
+        "  {name:'create_event', description:'book', source:'native'},"
+        "  {name:'echo_echo', description:'repeat', source:'echo'}];"
+        "const mcp = {enabled:true, present:true, active:true, problems:[], servers:["
+        "  {name:'echo', enabled:true, transport:'stdio', connected:true,"
+        "   tool_count:1, error:''}]};"
+        "console.log(JSON.stringify(renderTools(tools, mcp)));"
+    )
+
+    assert "built in" in html
+    assert "from echo" in html
+    assert html.index("create_event") < html.index("from echo")
+    assert html.index("from echo") < html.index("echo_echo")
+
+
+@needs_node
+def test_a_server_that_contributed_nothing_is_still_shown_with_its_reason():
+    """"Why is that tool gone?" is the question this pane exists to answer, and
+    a server that vanished silently is the case that answers it badly."""
+    html = run_node(
+        "import { renderTools } from './app.js';"
+        "const mcp = {enabled:true, present:true, active:true, problems:[], servers:["
+        "  {name:'broken', enabled:true, transport:'stdio', connected:false,"
+        "   tool_count:0, error:'ENOENT'},"
+        "  {name:'paused', enabled:false, transport:'stdio', connected:false,"
+        "   tool_count:0, error:''}]};"
+        "console.log(JSON.stringify(renderTools([], mcp)));"
+    )
+
+    assert "from broken" in html and "ENOENT" in html
+    assert "from paused" in html and "switched off" in html
+
+
+@needs_node
+def test_nothing_configured_renders_as_a_state_not_a_failure():
+    html = run_node(
+        "import { renderTools } from './app.js';"
+        "const tools = [{name:'remember', description:'keep a fact', source:'native'}];"
+        "const mcp = {enabled:false, present:false, active:false, problems:[], servers:[]};"
+        "console.log(JSON.stringify(renderTools(tools, mcp)));"
+    )
+
+    assert "remember" in html
+    assert "no external tool servers are configured" in html
+    assert "error" not in html.lower()
+
+
+@needs_node
+def test_a_server_name_cannot_inject_markup():
+    """Every other renderer escapes; this one reads a file a person edits."""
+    html = run_node(
+        "import { renderTools } from './app.js';"
+        "const mcp = {enabled:true, present:true, active:true, problems:[], servers:["
+        "  {name:'<script>x</script>', enabled:true, transport:'stdio',"
+        "   connected:false, tool_count:0, error:'<b>no</b>'}]};"
+        "console.log(JSON.stringify(renderTools([], mcp)));"
+    )
+
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html

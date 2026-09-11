@@ -67,6 +67,17 @@ considered and rejected there for stated reasons.
 - `miku/tools/` — `create_event` / `list_events` / `remember` / `propose_slots`, plus
   `registry.py` and the injectable `clock.py`. `proposals.py` is the delegating tool; it needs
   the whole session, so `open_session` appends it after `Deps` exists.
+- `miku/mcp/config.py` — what an external tool server is, parsed from `.miku/mcp.json`
+  into `MCPServerSpec`. It reads a file and connects to nothing, which is what makes it safe
+  for `inspect.py` to call mid-turn. It never reads the environment: `config.py` decided
+  where to look and whether to look, and reading a JSON file is not reading `os.environ`.
+- `miku/mcp/client.py` — connect, filter, namespace, degrade. Holds **one session per
+  server** for the life of the miku session, measured: `get_tools()` is the stateless path
+  and spawns a process per tool call (0.754s against 0.005s), which under stdio would be a
+  browser launched per click. It refuses to know anything about the graph — it returns a
+  list of tools, `deps.tools` gets longer, and nothing else changes. A borrowed tool is
+  rebuilt rather than annotated, because its result arrives as content blocks and
+  `nodes.py:242` is `str(output)`.
 - `miku/ops/tracing.py` — JSONL sink with redaction inside the sink, `span`/`parent` parentage,
   and a `listener` seam the gateways watch. Everything a watcher sees has passed the sink;
   that was aspirational until Phase 3b, when the one event bypassing it was moved onto the
@@ -86,6 +97,7 @@ Python 3.13, managed with `uv`.
 ```bash
 uv sync --extra dev              # install (CLI + evals)
 uv sync --extra dev --extra web  # add the web gateway (fastapi, uvicorn)
+uv sync --extra dev --extra mcp  # add external tool servers (langchain-mcp-adapters)
 uv run miku                # talk to Miku (new thread)
 uv run miku --thread work  # resume a named conversation
 uv run miku-web            # the cockpit on http://127.0.0.1:8765 (needs --extra web)
@@ -93,13 +105,21 @@ uv run pytest              # the whole suite
 uv run pytest -k live      # only the cases that call the real provider (judged cases included)
 uv run pytest evals/deterministic/test_fanout.py   # fan-out shape, no credentials
 uv run pytest evals/deterministic/test_web.py      # the web gateway, in-process, no port
+uv run pytest evals/deterministic/test_mcp.py      # external tool servers, no npx, no network
 uv run miku threads                # list held conversations (no credentials needed)
+uv run miku mcp                    # list external tool servers and what each contributed
 uv run miku consolidate            # show what tidying memory would do (writes nothing)
 uv run miku consolidate --apply    # actually resolve them
 uv run ruff check .        # lint (must be clean)
 ```
 
 Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` reflects that.
+
+To connect an external tool server: `cp mcp.example.json .miku/mcp.json`, edit it, and set
+`MIKU_MCP_ENABLED=true`. Both are needed — the file alone does nothing and the flag alone is
+not an error. The example's first entry is `evals/fixtures/mcp_echo_server.py`, which is the
+same file the MCP cases talk to, so it works on a fresh clone with no npx and no network.
+`.miku/` is gitignored, which is where a file holding a server's credentials belongs.
 
 ## Rules
 
@@ -213,7 +233,11 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
   options. Arguably a feature; untuned either way.
 - `main` defaults to `google/gemma-4-31b-it`. Measured, not assumed: `openai/gpt-4o-mini`
   fails the weekday-resolution cases (it books "Saturday" as a Thursday). `gemma` resolves
-  fan-out windows correctly too ("next week" -> the right Monday).
+  fan-out windows correctly too ("next week" -> the right Monday). That measurement was taken
+  against **four** tools. `chrome-devtools-mcp` offers **29**, counted from a live
+  `list_tools` — so connecting that one server unfiltered would ask gemma to choose among 33
+  where it was only ever measured at 4. Neither number means much alone; together they are
+  the whole argument for the allowlist.
 - A fan-out turn costs 8 requests and ~14 trace lines, against 2 and ~6 for a plain
   scheduling turn. A turn that calls no tool is unchanged at 2. The +1 is the `tool_call`
   event moving onto the tracer in Phase 3b.
@@ -309,6 +333,44 @@ Tests live under `evals/`, not `tests/` — `testpaths` in `pyproject.toml` refl
 - Renaming a conversation is unbuilt. A title is derived from the first user message at read
   time; storing one would falsify `checkpointer.py`'s standing claim that a conversation list
   needs no new data model.
+- MCP tool output is not truncated. A borrowed tool's text goes into the conversation
+  verbatim, and `nodes.py:187` re-sends the whole conversation every turn with no prompt
+  caching, so one `take_snapshot` — a page's entire accessibility tree — makes every
+  subsequent turn of that thread more expensive, permanently. Rejected for the reason Phase
+  3d rejected message trimming: what the agent retains within a conversation is *behaviour*,
+  and deciding it inside an infrastructure change is how a memory policy gets chosen by
+  accident. The allowlist is the only control and it is manual — and the tension is real,
+  because for a browser the most expensive tool is also the one without which the model is
+  blind. A browser conversation should be its own thread, and the cockpit has a button to
+  remove it.
+- Credentials held in `.miku/mcp.json` are not redacted from traces. The sink collects secret
+  *values* by reading the environment variables it was told about; a value that only ever
+  existed in a JSON file is out of its reach. Bounded by `.miku/` being gitignored, and an
+  extension of a risk Phase 3b accepted knowingly rather than a new one. Closing it means
+  letting `Tracer` take values, not only variable names.
+- stdio only. `transport` is a field in every server spec and defaults to `"stdio"`; anything
+  else is refused at load, naming the server. The seam exists so that Streamable HTTP is an
+  addition rather than a migration of every config file — the part that is missing is not the
+  transport, which is nearly free, but OAuth, which wants a callback listener in a gateway
+  that deliberately has no authentication.
+- Tools only. MCP has three surfaces and this reaches one: resources and prompts are neither
+  read nor registered. Concrete cost, measured: `D:\my-mcp`'s employee server exposes 13
+  tools and 2 resources, so its two `employees://performance` endpoints are invisible to
+  Miku. Cheap there; it would not be on a server built resource-first.
+- A non-text tool result is discarded and replaced with a placeholder naming what was
+  dropped. Any text in the same result survives. Accepting an image would need a declared
+  vision capability in `providers.py`, and capability flags here are declared, never
+  inferred.
+- How routing quality degrades as the tool count rises is **unmeasured**. The allowlist was
+  built on general grounds, not on a measurement, and this change says so rather than
+  implying otherwise. "How many bound tools before gemma misroutes" is a spike, and it is the
+  natural sequel.
+- A server that dies mid-session is not reconnected. Its tools return a result saying it is
+  unavailable, and restarting Miku is the remedy. Automatic reconnection is a supervision
+  policy and there is no measurement here to size one. Startup cost, for scale: 0.7s for the
+  in-repo fixture and 2.5s for `npx -y chrome-devtools-mcp@latest`, paid per server on every
+  `open_session` the connector is enabled for — which is why the eval suite's default-false
+  flag is a measured protection rather than a tidy one.
 - The web gateway binds loopback, has no authentication, and serves one local user. It is
   not built to be exposed and should not be — and that got sharper in Phase 3d, not softer.
   The cockpit now holds every conversation this agent has ever had, serves them to anyone who

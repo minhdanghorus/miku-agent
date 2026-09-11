@@ -33,6 +33,19 @@ def has_web_extra() -> bool:
 WEB_SKIP_REASON = "the web extra is not installed (uv sync --extra web)"
 
 
+def has_mcp_extra() -> bool:
+    """Whether the external-tool connector's optional dependency is installed.
+
+    Third instance of the same shape, after credentials and the web extra. No
+    new skip policy: an optional capability the suite skips around, naming what
+    is missing, so `uv sync --extra dev` alone stays a working install.
+    """
+    return importlib.util.find_spec("langchain_mcp_adapters") is not None
+
+
+MCP_SKIP_REASON = "the mcp extra is not installed (uv sync --extra mcp)"
+
+
 @dataclass
 class StubModel:
     """A scripted stand-in for a chat model.

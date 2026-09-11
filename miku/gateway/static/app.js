@@ -743,14 +743,64 @@ async function loadConfig() {
     )}</table>`;
 }
 
+// Pure, exported, and exercised under node for the same reason `renderTranscript`
+// is: it is the one place the cockpit answers "why is that tool gone?", and a
+// rendered page is not a reliable way to check that a server which contributed
+// nothing still appears.
+export function renderTools(tools, mcp = null) {
+  const table = (rows) =>
+    `<table>${rows
+      .map(
+        (tool) =>
+          `<tr><th>${escape(tool.name)}</th>` +
+          `<td class="wrap">${escape(tool.description)}</td></tr>`,
+      )
+      .join("")}</table>`;
+
+  const native = tools.filter((tool) => (tool.source || "native") === "native");
+  let html = `<h2>built in</h2>${table(native)}`;
+
+  // A built-in tool is in the repository; a contributed one depends on a
+  // process that may not start tomorrow. When a tool goes missing, that
+  // difference is the whole diagnosis, so the grouping is the point.
+  for (const server of (mcp && mcp.servers) || []) {
+    const borrowed = tools.filter((tool) => tool.source === server.name);
+    html += `<h2>from ${escape(server.name)}</h2>`;
+    if (borrowed.length) {
+      html += table(borrowed);
+      continue;
+    }
+    let why = "contributed nothing.";
+    if (!server.enabled) {
+      why = "switched off in the configuration file.";
+    } else if (server.error) {
+      why = `did not connect: ${server.error}`;
+    } else if (server.connected === null) {
+      why = "not contacted.";
+    }
+    html += `<p class="dim">${escape(why)}</p>`;
+  }
+
+  if (mcp && !mcp.active) {
+    const why = mcp.present
+      ? "the external tool connector is disabled (MIKU_MCP_ENABLED)."
+      : "no external tool servers are configured.";
+    html += `<p class="dim">${escape(why)}</p>`;
+  }
+
+  for (const problem of (mcp && mcp.problems) || []) {
+    html += `<p class="dim">! ${escape(problem)}</p>`;
+  }
+
+  return html;
+}
+
 async function loadTools() {
-  const tools = await (await fetch("/api/tools")).json();
-  $("#pane-tools").innerHTML = `<table>${tools
-    .map(
-      (tool) =>
-        `<tr><th>${escape(tool.name)}</th><td class="wrap">${escape(tool.description)}</td></tr>`,
-    )
-    .join("")}</table>`;
+  const [tools, mcp] = await Promise.all([
+    (await fetch("/api/tools")).json(),
+    (await fetch("/api/mcp")).json(),
+  ]);
+  $("#pane-tools").innerHTML = renderTools(tools, mcp);
 }
 
 async function loadMemory() {

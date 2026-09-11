@@ -1,0 +1,39 @@
+{
+  "_readme": [
+    "Copy this to .miku/mcp.json and set MIKU_MCP_ENABLED=true. Both are needed:",
+    "the file alone does nothing, and the flag alone is not an error.",
+    ".miku/ is gitignored, which is where the real file belongs -- a server",
+    "description carries the credentials that server is started with.",
+    "Run `uv sync --extra mcp` first, then `uv run miku mcp` to see what connected.",
+    "JSON has no comments, so this key is the documentation. It is ignored."
+  ],
+  "servers": [
+    {
+      "name": "echo",
+      "_note": "The in-repo fixture. No npx, no network, no credentials -- the one entry here that works on a fresh clone.",
+      "command": "python",
+      "args": ["evals/fixtures/mcp_echo_server.py"],
+      "transport": "stdio",
+      "enabled": true
+    },
+    {
+      "name": "chrome",
+      "_note": "Offers 29 tools, measured. Miku has 4. 'tools' is an allowlist, and omitting it binds all 29 -- which is why this entry names three.",
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"],
+      "transport": "stdio",
+      "enabled": false,
+      "tools": ["navigate_page", "take_snapshot", "click"]
+    },
+    {
+      "name": "employees",
+      "_note": "A server in its own project, with its own interpreter and relative imports. 'cwd' is what makes this expressible at all.",
+      "command": "D:\\my-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "employees.employee_server"],
+      "cwd": "D:\\my-mcp",
+      "transport": "stdio",
+      "enabled": false,
+      "env": {}
+    }
+  ]
+}

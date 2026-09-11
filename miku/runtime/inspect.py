@@ -36,10 +36,16 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.store.sqlite.aio import AsyncSqliteStore
 
+from miku.mcp.client import MCP_SERVER_KEY, ServerState
+from miku.mcp.config import load_mcp_config
 from miku.memory.store import LiveFact, live_facts
 from miku.ops.traceview import TraceNode, build_tree, read_records
 from miku.runtime.config import Settings
 from miku.runtime.providers import ROLES, ProviderError, get_provider, resolve_model
+
+# What `ToolView.source` says for a tool that lives in this repository. A
+# string rather than None so that grouping needs no special case.
+NATIVE = "native"
 
 
 @dataclass(frozen=True)
@@ -76,6 +82,12 @@ class ToolView:
 
     name: str
     description: str
+    # Where this tool came from: "native" for one that lives in this repository,
+    # otherwise the external server that contributed it. A native tool is in the
+    # source tree; a contributed one depends on a process that may not start
+    # tomorrow, and when a tool goes missing that difference is the whole
+    # diagnosis.
+    source: str = NATIVE
 
 
 def config_view(settings: Settings) -> ConfigView:
@@ -120,9 +132,90 @@ def tools_view(tools: list[BaseTool]) -> list[ToolView]:
     be quietly missing them.
     """
     return [
-        ToolView(name=tool.name, description=(tool.description or "").strip())
+        ToolView(
+            name=tool.name,
+            description=(tool.description or "").strip(),
+            source=(tool.metadata or {}).get(MCP_SERVER_KEY, NATIVE),
+        )
         for tool in sorted(tools, key=lambda tool: tool.name)
     ]
+
+
+@dataclass(frozen=True)
+class MCPServerView:
+    """One configured external tool server, as a person would want it reported.
+
+    `connected` is three-valued on purpose. True and False are what a session
+    observed; None means nobody has looked, because no session was passed --
+    and the one thing this function must not do to find out is connect.
+    """
+
+    name: str
+    enabled: bool
+    transport: str
+    connected: bool | None
+    tool_count: int = 0
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class MCPView:
+    """The connector as a whole: both gates, the file, and every server.
+
+    `enabled` and `present` are carried separately rather than collapsed into
+    one boolean so that a gateway can say "the connector is off", "nothing is
+    configured" and "a server is broken" as three different sentences. Collapsed,
+    they become one shrug.
+    """
+
+    enabled: bool
+    present: bool
+    path: str
+    servers: list[MCPServerView]
+    problems: list[str]
+
+    @property
+    def active(self) -> bool:
+        return self.enabled and self.present
+
+
+def mcp_view(settings: Settings, servers: list[ServerState] | None = None) -> MCPView:
+    """Configured servers, and how they fared if anyone knows.
+
+    The configured half comes from the file; the live half comes from a session
+    that already holds it. Nothing here starts a process -- not to list servers,
+    not to count tools, not even for a server that has never connected. This
+    surface is pinned read-only and safe to call in the middle of a turn, and
+    launching a browser to answer "which servers are configured" would break
+    that outright.
+
+    Reading a file is not reading the environment: `config.py` decided where to
+    look and whether to look, and this asks it.
+    """
+    config = load_mcp_config(settings)
+    live = {state.name: state for state in (servers or [])}
+
+    views = []
+    for spec in config.servers:
+        state = live.get(spec.name)
+        views.append(
+            MCPServerView(
+                name=spec.name,
+                enabled=spec.enabled,
+                transport=spec.transport,
+                connected=None if state is None else state.connected,
+                tool_count=0 if state is None else state.tool_count,
+                error="" if state is None or not state.error else state.error,
+            )
+        )
+
+    return MCPView(
+        enabled=config.enabled,
+        present=config.present,
+        path=str(config.path),
+        servers=views,
+        problems=list(config.problems),
+    )
 
 
 async def memory_view(
